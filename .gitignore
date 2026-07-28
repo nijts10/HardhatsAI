@@ -1,0 +1,22 @@
+# Python (services/ingest)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Node / Next.js (apps/web)
+node_modules/
+.next/
+out/
+
+# .NET (revit/HardhatsAI.Revit)
+bin/
+obj/
+
+# Secrets
+.env
+.env.local
+
+# OS
+.DS_Store

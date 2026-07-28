@@ -1,0 +1,24 @@
+[project]
+name = "hardhatsai-ingest"
+version = "0.1.0"
+description = "HardhatsAI ingestion worker: PDF -> pages -> chunks -> embeddings -> cited specs"
+requires-python = ">=3.11"
+dependencies = [
+  "psycopg[binary]>=3.1",
+  "pdfplumber>=0.11",
+  "anthropic>=0.40",
+  "openai>=1.50",
+  "tiktoken>=0.8",
+  "pydantic>=2.7",
+  "python-dotenv>=1.0",
+  "supabase>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "reportlab>=4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
