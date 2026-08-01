@@ -60,3 +60,64 @@ insert into prompt_library (use_case, prompt_text, category_id, language) values
    'Welke leveranciers van systeemwanden bieden Revit-families aan?',
    (select id from product_categories where code = 'technische_binnenwanden'), 'nl')
 on conflict do nothing;
+
+-- ---------------------------------------------------------------------
+-- Spec vocabulary (Phase 2) — enough to make the four wall categories and
+-- the prompt library's own use cases (demountable, BREEAM, Revit
+-- families) answerable once extraction actually runs against a document.
+-- ---------------------------------------------------------------------
+
+insert into spec_attributes
+  (key, name_nl, name_en, data_type, unit, enum_values, enum_ordinals, norm_reference, category_codes, description)
+values
+  ('fire_resistance_ei', 'Brandwerendheid EI', 'Fire resistance EI',
+   'numeric', 'min', null, null, 'EN 13501-2',
+   '{brandwerende_systeemwanden,akoestische_systeemwanden,technische_binnenwanden,glaswanden}',
+   'Integrity + insulation period in minutes.'),
+
+  ('fire_resistance_criterion', 'Brandwerendheidscriterium', 'Fire resistance criterion',
+   'enum', null, '{R,E,EW,EI,REI,REI-M}',
+   '{"R":1,"E":2,"EW":3,"EI":4,"REI":5,"REI-M":6}',
+   'EN 13501-2', '{brandwerende_systeemwanden}', null),
+
+  ('smoke_leakage_class', 'Rookdoorlatendheid', 'Smoke leakage class',
+   'enum', null, '{Sa,S200,Sm}', '{"Sa":1,"S200":2,"Sm":3}',
+   'EN 13501-2', '{brandwerende_systeemwanden}', null),
+
+  ('reaction_to_fire', 'Brandklasse (materiaal)', 'Reaction to fire (Euroclass)',
+   'enum', null, '{A1,A2,B,C,D,E,F}',
+   '{"A1":7,"A2":6,"B":5,"C":4,"D":3,"E":2,"F":1}',
+   'EN 13501-1', '{}', null),
+
+  ('airborne_sound_reduction_rw', 'Luchtgeluidisolatie Rw', 'Airborne sound reduction Rw',
+   'numeric', 'dB', null, null, 'EN ISO 717-1',
+   '{akoestische_systeemwanden,glaswanden,technische_binnenwanden}', null),
+
+  ('max_height_mm', 'Maximale wandhoogte', 'Maximum wall height',
+   'numeric', 'mm', null, null, null,
+   '{technische_binnenwanden,akoestische_systeemwanden,brandwerende_systeemwanden,glaswanden}',
+   'Directly answers the "geschikt tot een hoogte van 4 meter" prompt.'),
+
+  ('thickness_mm', 'Dikte', 'Thickness', 'numeric', 'mm', null, null, null, '{}', null),
+
+  ('demountable', 'Demontabel', 'Demountable',
+   'boolean', null, null, null, null, '{technische_binnenwanden}',
+   'Directly answers the demountable-partition prompt.'),
+
+  ('ce_marked', 'CE-markering', 'CE marked',
+   'boolean', null, null, null, 'CPR 305/2011', '{}', null),
+
+  ('breeam_contribution', 'BREEAM-bijdrage', 'BREEAM contribution',
+   'text', null, null, null, null, '{}',
+   'Free text describing how the product contributes to BREEAM credits. Directly answers the BREEAM prompt.'),
+
+  ('revit_family_available', 'Revit-familie beschikbaar', 'Revit family available',
+   'boolean', null, null, null, null, '{}',
+   'Directly answers the Revit-family-availability prompt.'),
+
+  ('application_area', 'Toepassingsgebied', 'Application area',
+   'text', null, null, null, null, '{}',
+   'Free text; covers hospital/school/lab suitability without a dedicated boolean per use case.')
+on conflict (key) do nothing;
+
+update spec_attributes set is_filterable = false where key in ('breeam_contribution', 'application_area');
