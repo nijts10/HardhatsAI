@@ -15,6 +15,9 @@ class Config:
     anthropic_model: str
     openai_api_key: str
     openai_embedding_model: str
+    openai_chat_model: str
+    google_api_key: str
+    gemini_model: str
     worker_name: str
 
     # text-embedding-3-small's native output size. document_chunks.embedding
@@ -32,6 +35,9 @@ def load_config() -> Config:
         anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"),
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         openai_embedding_model=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        openai_chat_model=os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o"),
+        google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
         worker_name=os.environ.get("WORKER_NAME", "visibility-ingest-worker"),
     )
 

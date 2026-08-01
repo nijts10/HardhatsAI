@@ -1,14 +1,15 @@
-"""Phase 2 report generator — data-coverage only.
+"""Phase 2 report generator.
 
-Deliberately NOT an AI-visibility score report: no prompt has been run
-against any AI model yet (that's benchmark-running, a later phase, and
-picking which AI systems to actually test against is a product decision,
-not an engineering default). What this generates is the thing that's
-actually possible right now: for each of a brand's products, how much of
-the relevant spec vocabulary is backed by a citation versus missing —
-exactly the "coverage" half of the brief's own data_completeness idea from
-the HardhatsAI schema, adapted here into an actual persisted report rather
-than a single ranking-bonus number.
+Two independent halves:
+  1. Data coverage — for each product, how much of the relevant spec
+     vocabulary is backed by a citation versus missing. Always computed;
+     doesn't depend on any benchmark having run.
+  2. AI visibility — mention rate per model (ChatGPT/Gemini) from the most
+     recent successful benchmark_runs for this brand, and which prompts
+     the brand was missing from. Only appears once a benchmark has
+     actually been run for this brand; the report says so explicitly
+     rather than silently omitting the section, so nobody mistakes
+     "no runs yet" for "0% visibility".
 """
 from __future__ import annotations
 
@@ -103,7 +104,61 @@ def compute_coverage(conn: psycopg.Connection, brand_id: str) -> BrandCoverage:
     return coverage
 
 
-def render_sections(coverage: BrandCoverage) -> list[tuple[str, str]]:
+@dataclass
+class ModelVisibility:
+    model: str
+    run_id: str
+    prompts_run: int
+    mentions: int
+    missed_prompts: list[str] = field(default_factory=list)
+
+    @property
+    def mention_rate(self) -> float:
+        return self.mentions / self.prompts_run if self.prompts_run else 0.0
+
+
+def compute_visibility(conn: psycopg.Connection, brand_id: str) -> list[ModelVisibility]:
+    """One entry per model that has at least one succeeded run, using only
+    the most recent succeeded run per model — older runs are history, not
+    part of the current picture."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct on (model) id, model, stats
+              from benchmark_runs
+             where brand_id = %s and status = 'succeeded'
+             order by model, started_at desc
+            """,
+            (brand_id,),
+        )
+        latest_runs = cur.fetchall()
+
+    results = []
+    for run in latest_runs:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select pl.prompt_text
+                  from benchmark_results br
+                  join prompt_library pl on pl.id = br.prompt_id
+                 where br.benchmark_run_id = %s and not br.brand_mentioned
+                 order by pl.use_case
+                """,
+                (run["id"],),
+            )
+            missed = [row["prompt_text"] for row in cur.fetchall()]
+
+        stats = run["stats"] or {}
+        results.append(ModelVisibility(
+            model=run["model"], run_id=run["id"],
+            prompts_run=stats.get("prompts_run", 0), mentions=stats.get("mentions", 0),
+            missed_prompts=missed,
+        ))
+
+    return results
+
+
+def render_sections(coverage: BrandCoverage, visibility: list[ModelVisibility] | None = None) -> list[tuple[str, str]]:
     """Returns [(heading, body), ...] ready to insert into report_sections,
     in display order."""
     sections: list[tuple[str, str]] = []
@@ -143,6 +198,29 @@ def render_sections(coverage: BrandCoverage) -> list[tuple[str, str]]:
         "\n".join(cert_lines) if cert_lines else "No certifications extracted yet.",
     ))
 
+    if not visibility:
+        sections.append((
+            "AI visibility",
+            "No AI-visibility benchmark has been run yet for this brand. "
+            "Run one with `ingest run-benchmark --model chatgpt|gemini` before this "
+            "section means anything — an empty result here is \"not measured\", not \"0%\".",
+        ))
+        return sections
+
+    visibility_lines = []
+    for v in visibility:
+        visibility_lines.append(
+            f"- {v.model}: mentioned in {v.mentions}/{v.prompts_run} prompts ({v.mention_rate:.0%})"
+        )
+    sections.append(("AI visibility", "\n".join(visibility_lines)))
+
+    for v in visibility:
+        if v.missed_prompts:
+            body = "\n".join(f"- {p}" for p in v.missed_prompts)
+        else:
+            body = "None — the brand was mentioned for every active prompt in this run."
+        sections.append((f"Where {v.model} misses {coverage.brand_name}", body))
+
     return sections
 
 
@@ -151,7 +229,12 @@ def create_report(
     kind: str = "audit", created_by: str | None = None,
 ) -> str:
     coverage = compute_coverage(conn, brand_id)
-    sections = render_sections(coverage)
+    visibility = compute_visibility(conn, brand_id)
+    sections = render_sections(coverage, visibility)
+
+    summary = f"Overall coverage {coverage.completeness:.0%} across {len(coverage.products)} product(s)."
+    if visibility:
+        summary += " " + "; ".join(f"{v.model} {v.mention_rate:.0%} visible" for v in visibility) + "."
 
     with conn.cursor() as cur:
         cur.execute(
@@ -163,7 +246,7 @@ def create_report(
             (
                 organization_id, brand_id, kind,
                 f"{coverage.brand_name} — data coverage report",
-                f"Overall coverage {coverage.completeness:.0%} across {len(coverage.products)} product(s).",
+                summary,
                 created_by,
             ),
         )

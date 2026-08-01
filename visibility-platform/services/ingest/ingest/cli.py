@@ -24,7 +24,7 @@ import argparse
 import pathlib
 import sys
 
-from . import db, pipeline, report, storage
+from . import benchmark, db, pipeline, report, storage
 from .config import load_config
 from .persistence import slugify
 
@@ -137,6 +137,38 @@ def cmd_generate_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_benchmark(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand_slug)
+    if brand is None:
+        print(f"no brand with slug '{args.brand_slug}'")
+        return 1
+
+    if args.model == "chatgpt":
+        if not config.openai_api_key:
+            print("OPENAI_API_KEY is not set")
+            return 1
+        caller = benchmark.make_chatgpt_caller(config.openai_api_key, config.openai_chat_model)
+    else:
+        if not config.google_api_key:
+            print("GOOGLE_API_KEY is not set")
+            return 1
+        caller = benchmark.make_gemini_caller(config.google_api_key, config.gemini_model)
+
+    print(f"running {args.model} against the active prompt library for {brand['name']}...")
+    run_id, stats = benchmark.run_benchmark(
+        conn, organization_id=brand["organization_id"], brand_id=brand["id"],
+        brand_name=brand["name"], model=args.model, caller=caller,
+    )
+    conn.commit()
+    conn.close()
+    print(f"run {run_id}: {stats.mentions}/{stats.prompts_run} prompts mentioned "
+          f"{brand['name']} ({stats.mention_rate:.0%})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ingest")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -163,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--brand-slug", required=True)
     p_report.add_argument("--kind", default="audit", choices=["audit", "monthly"])
     p_report.set_defaults(func=cmd_generate_report)
+
+    p_benchmark = sub.add_parser("run-benchmark", help="run the prompt library against ChatGPT or Gemini")
+    p_benchmark.add_argument("--brand-slug", required=True)
+    p_benchmark.add_argument("--model", required=True, choices=["chatgpt", "gemini"])
+    p_benchmark.set_defaults(func=cmd_run_benchmark)
 
     return parser
 

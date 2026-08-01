@@ -1,4 +1,4 @@
-from ingest.report import compute_coverage, create_report, render_sections
+from ingest.report import compute_coverage, compute_visibility, create_report, render_sections
 
 
 def _make_org_brand(conn, slug="acme"):
@@ -85,12 +85,14 @@ def test_render_sections_produces_readable_output(conn):
     coverage = compute_coverage(conn, brand_id)
     sections = render_sections(coverage)
     headings = [h for h, _ in sections]
-    assert headings == ["Overview", "Product coverage", "Missing data", "Certifications found"]
+    assert headings == ["Overview", "Product coverage", "Missing data", "Certifications found", "AI visibility"]
 
     product_section = dict(sections)["Product coverage"]
     assert "Acme 211" in product_section
     missing_section = dict(sections)["Missing data"]
     assert "Acme 211" in missing_section  # still has some missing specs
+    # No benchmark has run -- must say so explicitly, not silently show 0%.
+    assert "No AI-visibility benchmark has been run yet" in dict(sections)["AI visibility"]
 
 
 def test_create_report_persists_reports_and_sections(conn):
@@ -110,5 +112,45 @@ def test_create_report_persists_reports_and_sections(conn):
     assert report_row["status"] == "draft"
     assert report_row["kind"] == "audit"
     assert report_row["brand_id"] == brand_id
-    assert [s["heading"] for s in sections] == ["Overview", "Product coverage", "Missing data", "Certifications found"]
-    assert [s["section_order"] for s in sections] == [0, 1, 2, 3]
+    assert [s["heading"] for s in sections] == [
+        "Overview", "Product coverage", "Missing data", "Certifications found", "AI visibility",
+    ]
+    assert [s["section_order"] for s in sections] == [0, 1, 2, 3, 4]
+
+
+def test_compute_visibility_empty_when_no_runs(conn):
+    org_id, brand_id = _make_org_brand(conn)
+    assert compute_visibility(conn, brand_id) == []
+
+
+def test_compute_visibility_uses_latest_succeeded_run_per_model(conn):
+    org_id, brand_id = _make_org_brand(conn)
+    with conn.cursor() as cur:
+        cur.execute("select id, prompt_text from prompt_library order by use_case limit 2")
+        prompts = cur.fetchall()
+
+        # An older, failed chatgpt run -- must be ignored.
+        cur.execute(
+            "insert into benchmark_runs (organization_id, brand_id, model, status, started_at) "
+            "values (%s, %s, 'chatgpt', 'failed', now() - interval '2 days') returning id",
+            (org_id, brand_id),
+        )
+        # A newer, succeeded chatgpt run -- this is the one that should count.
+        cur.execute(
+            "insert into benchmark_runs (organization_id, brand_id, model, status, started_at, stats) "
+            "values (%s, %s, 'chatgpt', 'succeeded', now(), %s) returning id",
+            (org_id, brand_id, '{"prompts_run": 2, "mentions": 1}'),
+        )
+        run_id = cur.fetchone()["id"]
+        cur.execute(
+            "insert into benchmark_results (benchmark_run_id, prompt_id, response_text, brand_mentioned) "
+            "values (%s, %s, 'mentions Acme', true), (%s, %s, 'does not mention it', false)",
+            (run_id, prompts[0]["id"], run_id, prompts[1]["id"]),
+        )
+
+    results = compute_visibility(conn, brand_id)
+    assert len(results) == 1
+    assert results[0].model == "chatgpt"
+    assert results[0].mentions == 1
+    assert results[0].prompts_run == 2
+    assert results[0].missed_prompts == [prompts[1]["prompt_text"]]
