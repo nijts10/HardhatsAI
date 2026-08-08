@@ -1,19 +1,22 @@
 """Stage 5: embeddings.
 
-OpenAI text-embedding-3-small, chosen because it outputs 1536 dimensions
-natively — matching document_chunks.embedding vector(1536) and both search
-functions with no truncation or padding. See CLAUDE.md: changing the model
-means a migration and a full re-embed of the corpus.
+OpenAI text-embedding-3-small, chosen because it outputs
+config.EMBEDDING_DIMENSIONS worth of dimensions natively, matching
+document_chunks.embedding's column type with no truncation or padding.
+See CLAUDE.md: changing the model means a migration and a full re-embed
+of the corpus.
 """
 from __future__ import annotations
 
 from openai import OpenAI
 
+from .config import EMBEDDING_DIMENSIONS
+
 BATCH_SIZE = 96  # comfortably under OpenAI's per-request item/token limits
 
 
 class Embedder:
-    def __init__(self, api_key: str, model: str, expected_dimensions: int = 1536):
+    def __init__(self, api_key: str, model: str, expected_dimensions: int = EMBEDDING_DIMENSIONS):
         self._client = OpenAI(api_key=api_key)
         self._model = model
         self._expected_dimensions = expected_dimensions

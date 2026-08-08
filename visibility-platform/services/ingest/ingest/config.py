@@ -5,6 +5,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# The ONE place this number is chosen. text-embedding-3-small's native
+# output size, matching document_chunks.embedding's column type in
+# 0003_extraction.sql (vector(1536)).
+#
+# That migration is already applied to the live project -- per this repo's
+# rule (never hand-edit an applied migration) and Postgres's own
+# requirement that a vector(n) column's dimension be a literal, not a
+# variable, the SQL itself can't reference this constant directly. Every
+# other place in the codebase that needs this number imports it from here
+# instead of hardcoding it again, and tests/test_db.py has a test that
+# inserts against the real column to prove the two stay in sync. Changing
+# this constant means a new migration (ALTER COLUMN ... TYPE vector(N)) and
+# a full re-embed of the corpus -- it is not just a config edit.
+EMBEDDING_DIMENSIONS = 1536
+
 
 @dataclass(frozen=True)
 class Config:
@@ -20,10 +35,7 @@ class Config:
     gemini_model: str
     worker_name: str
 
-    # text-embedding-3-small's native output size. document_chunks.embedding
-    # is hardcoded to vector(1536) — changing this means a migration and a
-    # full re-embed.
-    embedding_dimensions: int = 1536
+    embedding_dimensions: int = EMBEDDING_DIMENSIONS
 
 
 def load_config() -> Config:

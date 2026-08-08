@@ -1,4 +1,7 @@
+import pytest
+
 from ingest import db
+from ingest.config import EMBEDDING_DIMENSIONS
 
 
 def _make_org(conn, slug="acme"):
@@ -94,9 +97,40 @@ def test_page_and_chunk_lifecycle(conn):
         chunk_type="prose", heading_path=["Intro"], content="some prose", token_count=2,
     )
     assert [c["id"] for c in db.get_chunks_missing_embeddings(conn, version_id)] == [chunk_id]
-    db.set_chunk_embedding(conn, chunk_id, [0.1] * 1536)
+    db.set_chunk_embedding(conn, chunk_id, [0.1] * EMBEDDING_DIMENSIONS)
     assert db.get_chunks_missing_embeddings(conn, version_id) == []
     assert len(db.get_all_chunks(conn, version_id)) == 1
+
+
+def test_document_chunks_embedding_column_enforces_config_dimensions(conn):
+    # The migration's vector(1536) is a literal in an already-applied SQL
+    # file -- it can't reference config.EMBEDDING_DIMENSIONS directly (see
+    # the comment above that constant). This is the live check that stands
+    # in for that reference: if a future change ever lets the two drift
+    # apart, this test catches it immediately instead of failing silently
+    # at embed time.
+    org_id = _make_org(conn, slug="dimcheck")
+    brand_id = _make_brand(conn, org_id, slug="dimcheck-brand")
+    product_id = db.create_product(conn, brand_id=brand_id, category_id=None, name="Dim Check", slug="dim-check")
+    document_id = db.create_document(conn, organization_id=org_id, product_id=product_id, title=None, kind="datasheet")
+    version_id = db.create_document_version(
+        conn, document_id=document_id, storage_path="dimcheck/aa/doc.pdf", original_filename="doc.pdf",
+        mime_type="application/pdf", byte_size=1, sha256="e" * 64, uploaded_by=None,
+    )
+    chunk_id = db.insert_chunk(
+        conn, document_version_id=version_id, chunk_index=0, page_start=1, page_end=1,
+        chunk_type="prose", heading_path=[], content="n/a", token_count=1,
+    )
+
+    # Exactly EMBEDDING_DIMENSIONS floats: the column must accept it.
+    db.set_chunk_embedding(conn, chunk_id, [0.1] * EMBEDDING_DIMENSIONS)
+
+    # One float short: the column must reject it. pgvector raises this as
+    # a plain exception, not a specific psycopg error class, so assert on
+    # the message rather than the exception type.
+    with pytest.raises(Exception, match="expected .* dimensions"):
+        db.set_chunk_embedding(conn, chunk_id, [0.1] * (EMBEDDING_DIMENSIONS - 1))
+    conn.rollback()
 
 
 def test_extraction_run_lifecycle(conn):
