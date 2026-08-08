@@ -27,20 +27,25 @@ def test_organization_brand_product_lookups(conn):
 
 
 def test_category_ancestor_codes_walks_the_tree(conn):
+    # Codes prefixed __test_ so this can never collide with seed.sql's real
+    # category tree (which now genuinely includes isolatiematerialen ->
+    # steenwol -> ... as of 0006/seed.sql) -- conftest.py applies seed.sql
+    # before tests run, so an unprefixed "steenwol" here would hit
+    # product_categories.code's unique constraint against the real row.
     with conn.cursor() as cur:
         cur.execute(
             "insert into product_categories (code, name_nl, name_en) values (%s, %s, %s) returning id",
-            ("isolatie", "Isolatie", "Insulation"),
+            ("__test_isolatie_root", "Isolatie", "Insulation"),
         )
         root_id = cur.fetchone()["id"]
         cur.execute(
             "insert into product_categories (code, name_nl, name_en, parent_id) values (%s, %s, %s, %s) returning id",
-            ("steenwol", "Steenwol", "Rock wool", root_id),
+            ("__test_steenwol_leaf", "Steenwol", "Rock wool", root_id),
         )
         leaf_id = cur.fetchone()["id"]
 
-    assert db.get_category_ancestor_codes(conn, leaf_id) == ["steenwol", "isolatie"]
-    assert db.get_category_ancestor_codes(conn, root_id) == ["isolatie"]
+    assert db.get_category_ancestor_codes(conn, leaf_id) == ["__test_steenwol_leaf", "__test_isolatie_root"]
+    assert db.get_category_ancestor_codes(conn, root_id) == ["__test_isolatie_root"]
     assert db.get_category_ancestor_codes(conn, None) == []
 
 
