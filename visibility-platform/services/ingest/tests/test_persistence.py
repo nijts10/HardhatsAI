@@ -105,6 +105,56 @@ def test_persist_inserts_product_and_stated_claim_with_citation(conn):
     assert "not_a_real_key" not in claims
 
 
+def test_persist_derived_claim_requires_citation_and_keeps_derivation_note(conn):
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="eta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-eta"))
+        placeholder_product_id = cur.fetchone()["id"]
+    document_id, version_id = _make_document(conn, org_id, placeholder_product_id, "4" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id",
+            (version_id,),
+        )
+        run_id = cur.fetchone()["id"]
+
+    page_text = "Combustibility of Materials at 750 C - Noncombustible"
+    extracted = [{
+        "name": "Eta Product",
+        "claims": [
+            # valid: derived, but cited with a real verbatim snippet + a
+            # separate derivation_note for the reasoning.
+            {"key": "fire_resistance_ei", "value_numeric": 60, "unit": "min", "presence": "derived",
+             "page_number": 1, "source_snippet": page_text,
+             "derivation_note": "US noncombustibility implies this EI rating."},
+            # invalid: derived with no citation at all -- must be rejected,
+            # not silently accepted the way it was before fix 7.
+            {"key": "max_height_mm", "value_numeric": 4000, "presence": "derived"},
+        ],
+    }]
+
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id,
+        extraction_run_id=run_id, extracted_products=extracted,
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: page_text,
+    )
+
+    assert stats.claims_inserted == 1
+    assert stats.claims_rejected == 1
+    assert "derived claim missing" in stats.rejections[0]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select c.derivation_note from claims c join spec_attributes sa on sa.id = c.spec_attribute_id "
+            "where sa.key = 'fire_resistance_ei' and c.is_current"
+        )
+        row = cur.fetchone()
+    assert row["derivation_note"] == "US noncombustibility implies this EI rating."
+
+
 def test_persist_rejects_uncited_stated_claim_but_keeps_product(conn):
     org_id, brand_id = _make_org_brand_product(conn, org_slug="beta")
     with conn.cursor() as cur:
@@ -137,6 +187,172 @@ def test_persist_rejects_uncited_stated_claim_but_keeps_product(conn):
     assert stats.claims_inserted == 0
     assert stats.claims_rejected == 1
     assert "not found verbatim" in stats.rejections[0]
+
+
+def test_persist_upsert_product_dedupes_by_slug_despite_manufacturer_ref_casing_drift(conn):
+    # Observed against a real document: re-extracting the same PDF returned
+    # manufacturer_ref with different capitalization between calls
+    # ("Rockwool" vs "ROCKWOOL"). An exact-string lookup on manufacturer_ref
+    # would miss the existing row and then collide with products.slug's
+    # unique constraint on insert, since slugify() normalizes both to the
+    # same slug. This must dedupe to one product either way.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="delta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-delta"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(manufacturer_ref):
+        return [{
+            "name": "ROXUL Safe", "manufacturer_ref": manufacturer_ref,
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "e" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted("Rockwool"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "f" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("ROCKWOOL"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    assert stats.products_created_or_updated == 1
+    with conn.cursor() as cur:
+        cur.execute("select id from products where slug = 'roxul-safe-rockwool'")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+
+
+def test_persist_variants_get_distinct_current_claims_per_variant(conn):
+    # The whole point of fix 6: two variants of one product can carry
+    # DIFFERENT values for the same spec (e.g. sound reduction by
+    # thickness) without the unique-current-claim constraint colliding.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="epsilon")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-epsilon"))
+        placeholder_product_id = cur.fetchone()["id"]
+    document_id, version_id = _make_document(conn, org_id, placeholder_product_id, "1" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id",
+            (version_id,),
+        )
+        run_id = cur.fetchone()["id"]
+
+    page_text = "40mm: Rw 45 dB. 80mm: Rw 52 dB."
+    extracted = [{
+        "name": "Insulatie X",
+        "claims": [{"key": "thickness_mm", "presence": "not_stated"}],
+        "variants": [
+            {"label": "40mm", "claims": [
+                {"key": "airborne_sound_reduction_rw", "value_numeric": 45, "unit": "dB",
+                 "presence": "stated", "page_number": 1, "source_snippet": "40mm: Rw 45 dB."},
+            ]},
+            {"label": "80mm", "claims": [
+                {"key": "airborne_sound_reduction_rw", "value_numeric": 52, "unit": "dB",
+                 "presence": "stated", "page_number": 1, "source_snippet": "80mm: Rw 52 dB."},
+            ]},
+        ],
+    }]
+
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id,
+        extraction_run_id=run_id, extracted_products=extracted,
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: page_text,
+    )
+
+    assert stats.products_created_or_updated == 1
+    assert stats.variants_created_or_updated == 2
+    assert stats.claims_inserted == 3  # product-level thickness_mm + 2 variant-level Rw claims
+    assert stats.claims_rejected == 0
+
+    with conn.cursor() as cur:
+        cur.execute("select id from products where slug = 'insulatie-x'")
+        product_id = cur.fetchone()["id"]
+        cur.execute(
+            "select pv.label, c.value_numeric from product_variants pv "
+            "join claims c on c.variant_id = pv.id and c.is_current "
+            "where pv.product_id = %s order by pv.label",
+            (product_id,),
+        )
+        rows = cur.fetchall()
+
+    assert {(r["label"], float(r["value_numeric"])) for r in rows} == {("40mm", 45.0), ("80mm", 52.0)}
+
+
+def test_persist_variant_dedupes_by_slug_and_supersedes_changed_value(conn):
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="zeta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-zeta"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(value, snippet):
+        return [{
+            "name": "Insulatie Z", "claims": [],
+            "variants": [{"label": "40mm", "claims": [
+                {"key": "airborne_sound_reduction_rw", "value_numeric": value, "unit": "dB",
+                 "presence": "stated", "page_number": 1, "source_snippet": snippet},
+            ]}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "2" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted(45, "Rw 45"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "Rw 45",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "3" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted(46, "Rw 46"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "Rw 46",
+    )
+
+    assert stats.variants_created_or_updated == 1  # same variant, not a duplicate
+    assert stats.claims_superseded == 1
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from product_variants where slug = '40mm'")
+        assert cur.fetchone()["n"] == 1
 
 
 def test_persist_supersedes_changed_claim_value(conn):

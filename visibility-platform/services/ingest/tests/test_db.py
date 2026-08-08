@@ -26,6 +26,24 @@ def test_organization_brand_product_lookups(conn):
     assert db.get_category_by_code(conn, "brandwerende_systeemwanden") is not None
 
 
+def test_category_ancestor_codes_walks_the_tree(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into product_categories (code, name_nl, name_en) values (%s, %s, %s) returning id",
+            ("isolatie", "Isolatie", "Insulation"),
+        )
+        root_id = cur.fetchone()["id"]
+        cur.execute(
+            "insert into product_categories (code, name_nl, name_en, parent_id) values (%s, %s, %s, %s) returning id",
+            ("steenwol", "Steenwol", "Rock wool", root_id),
+        )
+        leaf_id = cur.fetchone()["id"]
+
+    assert db.get_category_ancestor_codes(conn, leaf_id) == ["steenwol", "isolatie"]
+    assert db.get_category_ancestor_codes(conn, root_id) == ["isolatie"]
+    assert db.get_category_ancestor_codes(conn, None) == []
+
+
 def test_document_and_version_lifecycle(conn):
     org_id = _make_org(conn)
     brand_id = _make_brand(conn, org_id)

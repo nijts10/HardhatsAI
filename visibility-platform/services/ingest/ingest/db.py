@@ -48,6 +48,16 @@ def get_category_by_code(conn: psycopg.Connection, code: str) -> Optional[dict]:
         return cur.fetchone()
 
 
+def get_category_ancestor_codes(conn: psycopg.Connection, category_id: Optional[str]) -> list[str]:
+    """category_id's own code plus every ancestor's, closest first. Empty
+    list for a null category_id -- see category_and_ancestor_codes() in
+    0006_category_hierarchy.sql for why that's correct rather than an error."""
+    with conn.cursor() as cur:
+        cur.execute("select category_and_ancestor_codes(%s) as codes", (category_id,))
+        row = cur.fetchone()
+    return row["codes"] if row else []
+
+
 def create_product(
     conn: psycopg.Connection, *, brand_id: str, category_id: Optional[str],
     name: str, slug: str, manufacturer_ref: Optional[str] = None,
@@ -62,6 +72,36 @@ def create_product(
             (brand_id, category_id, name, slug, manufacturer_ref),
         )
         return cur.fetchone()["id"]
+
+
+def get_variant_by_slug(conn: psycopg.Connection, product_id: str, slug: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select * from product_variants where product_id = %s and slug = %s",
+            (product_id, slug),
+        )
+        return cur.fetchone()
+
+
+def create_variant(
+    conn: psycopg.Connection, *, product_id: str, label: str, slug: str,
+    manufacturer_ref: Optional[str] = None,
+) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into product_variants (product_id, label, slug, manufacturer_ref)
+            values (%s, %s, %s, %s)
+            returning id
+            """,
+            (product_id, label, slug, manufacturer_ref),
+        )
+        return cur.fetchone()["id"]
+
+
+def update_variant_label(conn: psycopg.Connection, variant_id: str, label: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("update product_variants set label = %s where id = %s", (label, variant_id))
 
 
 # ---------------------------------------------------------------------
@@ -275,14 +315,21 @@ def finish_extraction_run(
 # Claims & certifications
 # ---------------------------------------------------------------------
 
-def get_current_claim(conn: psycopg.Connection, product_id: str, spec_attribute_id: str) -> Optional[dict]:
+def get_current_claim(
+    conn: psycopg.Connection, product_id: str, spec_attribute_id: str, *,
+    variant_id: Optional[str] = None,
+) -> Optional[dict]:
+    # "is not distinct from" (not plain "=") so variant_id=None correctly
+    # matches product-level rows (variant_id is null) instead of matching
+    # nothing -- SQL's "x = null" is never true, even when x is itself null.
     with conn.cursor() as cur:
         cur.execute(
             """
             select * from claims
              where product_id = %s and spec_attribute_id = %s and is_current
+               and variant_id is not distinct from %s
             """,
-            (product_id, spec_attribute_id),
+            (product_id, spec_attribute_id, variant_id),
         )
         return cur.fetchone()
 
@@ -292,17 +339,18 @@ def insert_claim(conn: psycopg.Connection, claim: dict, *, is_current: bool = Tr
         cur.execute(
             """
             insert into claims
-              (product_id, spec_attribute_id, value_numeric, value_numeric_max,
+              (product_id, variant_id, spec_attribute_id, value_numeric, value_numeric_max,
                value_text, value_bool, value_enum, unit, presence, confidence,
-               document_version_id, chunk_id, page_number, source_snippet,
+               document_version_id, chunk_id, page_number, source_snippet, derivation_note,
                extraction_run_id, is_current)
-            values (%(product_id)s, %(spec_attribute_id)s, %(value_numeric)s, %(value_numeric_max)s,
+            values (%(product_id)s, %(variant_id)s, %(spec_attribute_id)s, %(value_numeric)s, %(value_numeric_max)s,
                     %(value_text)s, %(value_bool)s, %(value_enum)s, %(unit)s, %(presence)s, %(confidence)s,
-                    %(document_version_id)s, %(chunk_id)s, %(page_number)s, %(source_snippet)s,
+                    %(document_version_id)s, %(chunk_id)s, %(page_number)s, %(source_snippet)s, %(derivation_note)s,
                     %(extraction_run_id)s, %(is_current)s)
             returning id
             """,
-            {**claim, "is_current": is_current},
+            {"variant_id": claim.get("variant_id"), "derivation_note": claim.get("derivation_note"),
+             **claim, "is_current": is_current},
         )
         return cur.fetchone()["id"]
 

@@ -1,4 +1,6 @@
-from ingest.extraction import build_prompt, extract_claims
+import json
+
+from ingest.extraction import build_prompt, extract_claims, spec_attributes_for_category
 
 
 class _FakeToolUseBlock:
@@ -37,6 +39,43 @@ SPEC_ATTRS = [
 ]
 
 
+def test_spec_attributes_for_category_keeps_universal_and_matching_scoped_rows():
+    rows = [
+        {"key": "thickness_mm", "category_codes": []},
+        {"key": "fire_resistance_ei", "category_codes": ["brandwerende_systeemwanden", "glaswanden"]},
+        {"key": "demountable", "category_codes": ["technische_binnenwanden"]},
+    ]
+
+    result = spec_attributes_for_category(rows, ["brandwerende_systeemwanden"])
+
+    keys = {d["key"] for d in result}
+    assert keys == {"thickness_mm", "fire_resistance_ei"}
+
+
+def test_spec_attributes_for_category_with_no_category_keeps_only_universal_rows():
+    rows = [
+        {"key": "thickness_mm", "category_codes": []},
+        {"key": "fire_resistance_ei", "category_codes": ["brandwerende_systeemwanden"]},
+    ]
+
+    result = spec_attributes_for_category(rows, None)
+
+    assert {d["key"] for d in result} == {"thickness_mm"}
+    assert {d["key"] for d in spec_attributes_for_category(rows, [])} == {"thickness_mm"}
+
+
+def test_spec_attributes_for_category_inherits_from_ancestor_codes():
+    # A spec tagged at a broad parent category ("mineral_wool") should
+    # apply to a product whose own category is a descendant ("rock_wool"),
+    # as long as the caller passes the ancestor-inclusive code list (what
+    # db.get_category_ancestor_codes returns for that product's category).
+    rows = [{"key": "thermal_conductivity", "category_codes": ["mineral_wool"]}]
+
+    applicable_codes = ["rock_wool", "mineral_wool", "insulation"]  # leaf -> root
+    assert {d["key"] for d in spec_attributes_for_category(rows, applicable_codes)} == {"thermal_conductivity"}
+    assert spec_attributes_for_category(rows, ["facade_cladding"]) == []
+
+
 def test_build_prompt_includes_vocabulary_brand_name_and_forbids_invented_keys():
     prompt = build_prompt(
         brand_name="Acme",
@@ -49,6 +88,32 @@ def test_build_prompt_includes_vocabulary_brand_name_and_forbids_invented_keys()
     assert "Acme" in prompt
     assert "ONLY use these keys" in prompt
     assert "Brandwerendheid EI 60" in prompt
+
+
+def test_extract_claims_passes_variants_through_untouched():
+    fake_products = [{
+        "name": "Insulatie X", "manufacturer_ref": None,
+        "claims": [{"key": "demountable", "presence": "not_stated"}],
+        "certifications": [],
+        "variants": [
+            {"label": "40mm", "manufacturer_ref": None,
+             "claims": [{"key": "airborne_sound_reduction_rw", "value_numeric": 45, "unit": "dB",
+                         "presence": "stated", "page_number": 1, "source_snippet": "40mm Rw 45"}]},
+            {"label": "80mm", "manufacturer_ref": None,
+             "claims": [{"key": "airborne_sound_reduction_rw", "value_numeric": 52, "unit": "dB",
+                         "presence": "stated", "page_number": 1, "source_snippet": "80mm Rw 52"}]},
+        ],
+    }]
+    client = _FakeClient(fake_products)
+
+    result = extract_claims(
+        client, model="claude-sonnet-5", brand_name="Acme",
+        spec_attributes=SPEC_ATTRS,
+        chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
+    )
+
+    assert result == fake_products
+    assert [v["label"] for v in result[0]["variants"]] == ["40mm", "80mm"]
 
 
 def test_extract_claims_returns_tool_input_and_forces_tool_choice():
@@ -69,6 +134,42 @@ def test_extract_claims_returns_tool_input_and_forces_tool_choice():
     assert result == fake_products
     assert client.messages.last_kwargs["tool_choice"] == {"type": "tool", "name": "emit_products"}
     assert client.messages.last_kwargs["tools"][0]["name"] == "emit_products"
+
+
+def test_extract_claims_unwraps_double_encoded_products_string():
+    # Observed against a real document: the model sometimes returns the
+    # "products" field as a JSON-encoded string of the whole
+    # {"products": [...]} object instead of a structured array.
+    fake_products = [{
+        "name": "ROXUL Safe", "manufacturer_ref": None,
+        "claims": [{"key": "demountable", "presence": "not_stated"}],
+        "certifications": [],
+    }]
+    client = _FakeClient(json.dumps({"products": fake_products}))
+
+    result = extract_claims(
+        client, model="claude-sonnet-5", brand_name="Rockwool",
+        spec_attributes=SPEC_ATTRS,
+        chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
+    )
+
+    assert result == fake_products
+
+
+def test_extract_claims_unwraps_double_encoded_bare_array_string():
+    fake_products = [{
+        "name": "ROXUL Safe", "manufacturer_ref": None,
+        "claims": [], "certifications": [],
+    }]
+    client = _FakeClient(json.dumps(fake_products))
+
+    result = extract_claims(
+        client, model="claude-sonnet-5", brand_name="Rockwool",
+        spec_attributes=SPEC_ATTRS,
+        chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
+    )
+
+    assert result == fake_products
 
 
 def test_extract_claims_returns_empty_list_when_no_tool_use_block():

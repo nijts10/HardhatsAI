@@ -69,10 +69,7 @@ def compute_coverage(conn: psycopg.Connection, brand_id: str) -> BrandCoverage:
                  where sa.is_filterable
                    and (
                      sa.category_codes = '{}'
-                     or exists (
-                       select 1 from product_categories pc
-                        where pc.id = %s and pc.code = any(sa.category_codes)
-                     )
+                     or sa.category_codes && category_and_ancestor_codes(%s)
                    )
                  order by sa.key
                 """,
@@ -80,12 +77,16 @@ def compute_coverage(conn: psycopg.Connection, brand_id: str) -> BrandCoverage:
             )
             relevant_attrs = cur.fetchall()
 
+            # variant_id is null -- this is PRODUCT-level coverage. A spec
+            # known for only one variant shouldn't count as "known" for the
+            # product as a whole; variant-level coverage is a separate
+            # question this report doesn't answer yet.
             cur.execute(
                 """
                 select sa.key
                   from claims c
                   join spec_attributes sa on sa.id = c.spec_attribute_id
-                 where c.product_id = %s and c.is_current
+                 where c.product_id = %s and c.variant_id is null and c.is_current
                    and c.presence in ('stated', 'derived', 'manual')
                 """,
                 (product["id"],),

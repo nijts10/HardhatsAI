@@ -12,7 +12,7 @@ from . import db, storage
 from .chunking import build_chunks
 from .config import Config
 from .embedding import Embedder
-from .extraction import PARSER_VERSION, PROMPT_VERSION, extract_claims
+from .extraction import PARSER_VERSION, PROMPT_VERSION, extract_claims, spec_attributes_for_category
 from .parsing import claude_vision_extractor, parse_pdf
 from .persistence import persist_extracted_products
 
@@ -60,7 +60,12 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
             db.set_chunk_embedding(conn, chunk["id"], vector)
 
     spec_attributes = db.get_spec_attributes(conn)
+    # spec_attrs_by_key stays the FULL vocabulary, so persistence still accepts
+    # any approved key the model states even if it fell outside this product's
+    # category scope below -- the scoping only narrows what we ASK about.
     spec_attrs_by_key = {d["key"]: d for d in spec_attributes}
+    category_codes = db.get_category_ancestor_codes(conn, product_row["category_id"])
+    prompt_spec_attributes = spec_attributes_for_category(spec_attributes, category_codes)
     all_chunks = db.get_all_chunks(conn, document_version_id)
 
     run_id = db.start_extraction_run(
@@ -72,7 +77,7 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
     try:
         extracted = extract_claims(
             anthropic_client, model=config.anthropic_model, brand_name=product_row["brand_name"],
-            spec_attributes=spec_attributes, chunks=all_chunks,
+            spec_attributes=prompt_spec_attributes, chunks=all_chunks,
         )
     except Exception as exc:
         db.finish_extraction_run(conn, run_id, status="failed", stats={}, error=str(exc))

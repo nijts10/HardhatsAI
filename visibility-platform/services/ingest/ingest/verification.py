@@ -80,14 +80,23 @@ def verify_claim(claim: dict, spec_attribute: dict, page_text: str | None) -> Ve
     if presence == "not_stated":
         return VerificationResult(True, {**claim, "value_numeric": None, "value_numeric_max": None,
                                           "value_text": None, "value_bool": None, "value_enum": None,
-                                          "unit": None}, None)
+                                          "unit": None, "derivation_note": None}, None)
 
     snippet = claim.get("source_snippet")
     page_number = claim.get("page_number")
 
-    if presence == "stated":
+    # 'derived' gets the SAME citation requirement as 'stated', not a free
+    # pass. A derived value is computed from other stated facts, but
+    # source_snippet must still be a pure verbatim quote of those
+    # underlying facts -- the model's own reasoning for the derivation
+    # belongs in derivation_note (checked below, deliberately NOT
+    # verbatim-checked since it's the model's own words), never mixed into
+    # source_snippet. Before this, a 'derived' claim skipped this whole
+    # block and could carry any snippet -- or none -- and still be
+    # accepted; that's the gap this closes.
+    if presence in ("stated", "derived"):
         if not snippet or page_number is None:
-            return VerificationResult(False, None, "stated claim missing source_snippet or page_number")
+            return VerificationResult(False, None, f"{presence} claim missing source_snippet or page_number")
         if page_text is None:
             return VerificationResult(False, None, f"no page text available for page {page_number} to verify against")
         if not snippet_in_page(snippet, page_text):

@@ -6,6 +6,7 @@ value or as presence='not_stated'.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from anthropic import Anthropic
@@ -28,9 +29,20 @@ _CLAIM_SCHEMA = {
         "presence": {"type": "string", "enum": ["stated", "derived", "not_stated"]},
         "page_number": {"type": ["integer", "null"]},
         "source_snippet": {"type": ["string", "null"]},
+        "derivation_note": {"type": ["string", "null"]},
         "confidence": {"type": ["number", "null"]},
     },
     "required": ["key", "presence"],
+}
+
+_VARIANT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "manufacturer_ref": {"type": ["string", "null"]},
+        "claims": {"type": "array", "items": _CLAIM_SCHEMA},
+    },
+    "required": ["label", "claims"],
 }
 
 _CERTIFICATION_SCHEMA = {
@@ -60,6 +72,7 @@ _TOOL = {
                         "manufacturer_ref": {"type": ["string", "null"]},
                         "claims": {"type": "array", "items": _CLAIM_SCHEMA},
                         "certifications": {"type": "array", "items": _CERTIFICATION_SCHEMA},
+                        "variants": {"type": "array", "items": _VARIANT_SCHEMA},
                     },
                     "required": ["name", "claims"],
                 },
@@ -68,6 +81,29 @@ _TOOL = {
         "required": ["products"],
     },
 }
+
+
+def spec_attributes_for_category(spec_attributes: list[dict], applicable_codes: list[str] | None) -> list[dict]:
+    """Scope the vocabulary handed to the model to what's actually relevant
+    to this product's category, instead of asking about all 12+ rows on
+    every document regardless of what kind of product it is.
+
+    applicable_codes is the product's own category code PLUS every
+    ancestor's (see db.get_category_ancestor_codes /
+    category_and_ancestor_codes() in 0006_category_hierarchy.sql) -- a spec
+    tagged at a broad parent category (e.g. "mineral wool") is relevant to
+    every descendant (e.g. "rock wool") without needing to be re-listed on
+    each one. An empty spec_attribute.category_codes means "universal"
+    (applies everywhere); a product with no category assigned yet only
+    gets the universal rows -- we can't yet judge relevance of
+    category-scoped ones for it, so we correctly never ask about them (a
+    "no row" / not-yet-evaluated state) rather than guessing. Mirrors the
+    same filter report.py uses for coverage."""
+    codes = set(applicable_codes or [])
+    return [
+        d for d in spec_attributes
+        if not d.get("category_codes") or codes & set(d["category_codes"])
+    ]
 
 
 def build_prompt(*, brand_name: str, spec_attributes: list[dict], chunks: list[dict]) -> str:
@@ -90,8 +126,8 @@ def build_prompt(*, brand_name: str, spec_attributes: list[dict], chunks: list[d
     return f"""You are extracting structured product claims from a manufacturer
 document for the brand "{brand_name}", for an AI-visibility auditing platform.
 
-Controlled claim vocabulary — you may ONLY use these keys. Do not invent keys
-outside this list; if a value doesn't map to one of these, omit it entirely:
+Controlled claim vocabulary — you may ONLY use these keys for anything you
+are confident is a real spec:
 {chr(10).join(vocab_lines)}
 
 Rules:
@@ -105,12 +141,37 @@ Rules:
    document is silent about it; 'not_stated' IS the answer in that case.
 3. source_snippet must be copied VERBATIM from the chunk text, character for
    character — not paraphrased or reformatted. It must include the
-   page_number it came from.
+   page_number it came from. This applies to 'derived' claims too, not
+   just 'stated' ones — see rule 4.
 4. Only set presence 'stated' when the value is explicitly written in the
-   document. Use 'derived' for values you computed from other stated values
-   and say so in source_snippet.
+   document. Use 'derived' when you compute a value from other stated
+   facts instead — but source_snippet must STILL be a pure verbatim quote
+   of the underlying stated text you derived from (same rule as #3), never
+   your own reasoning or wording. Put your reasoning for the derivation in
+   derivation_note instead — that field is your own words explaining the
+   inference and is NOT required to be verbatim. Never write things like
+   "(derived from X, corresponding to Y)" inside source_snippet — that
+   sentence fragment doesn't literally appear in the document and will be
+   rejected; it belongs in derivation_note.
 5. Also emit any certifications found (CE, KOMO, BREEAM, DoP, EPD, FSC, ...)
    with their scheme, number, issuer, page and a verbatim snippet.
+6. Do not invent a new key for a fact that doesn't match the vocabulary
+   above. Instead, flag it for human review: emit it as its own claims
+   entry using key "application_area", presence 'stated', with value_text
+   starting with "[UNMAPPED: <short label>]" followed by a brief
+   description, and its own real page_number and verbatim source_snippet
+   for that specific fact. If you find several such facts, emit one
+   "application_area" entry per fact rather than combining them into one —
+   this is a temporary holding place, not the fact's real home.
+7. If the document gives DIFFERENT measured values for different variants
+   of the same product (e.g. performance that changes by thickness), do
+   NOT force one value onto the product or silently pick one. Emit a
+   "variants" array on that product, one entry per distinct variant (a
+   short label like "40mm", plus its own claims for the specs that differ
+   by variant). Keep specs that are the SAME across every variant at the
+   product level (in the product's own "claims"), not repeated under each
+   variant — only put a spec under a variant when its value genuinely
+   differs from variant to variant.
 
 Document chunks:
 
@@ -135,5 +196,18 @@ def extract_claims(
 
     for block in message.content:
         if block.type == "tool_use" and block.name == _TOOL_NAME:
-            return block.input.get("products", [])
+            return _coerce_products(block.input.get("products", []))
     return []
+
+
+def _coerce_products(products: Any) -> list[dict[str, Any]]:
+    """Observed in the wild: the model sometimes double-encodes the array,
+    returning a JSON string (of either the bare array or the whole
+    {"products": [...]} object) in the "products" field instead of
+    structured content matching the declared tool schema. Parse it back
+    rather than let a string reach persistence, where iterating over it
+    yields characters, not product dicts."""
+    if isinstance(products, str):
+        parsed = json.loads(products)
+        products = parsed.get("products", parsed) if isinstance(parsed, dict) else parsed
+    return products
