@@ -14,6 +14,33 @@ insert into product_categories (code, name_nl, name_en) values
 on conflict (code) do nothing;
 
 -- ---------------------------------------------------------------------
+-- Category hierarchy — the first real branch under the parent_id tree
+-- from 0006_category_hierarchy.sql (that migration only added the
+-- mechanism; this is actual category data). Insulation materials get
+-- progressively more specific: isolatiematerialen (root) -> steenwol
+-- (material) -> brandwerende_steenwol (fire-safing/firestopping use --
+-- matches the first real document ingested this project, Rockwool ROXUL
+-- Safe, which has no home in the four wall categories above since it
+-- isn't a wall system). Parents are inserted before children so each
+-- child's parent_id subquery resolves; on conflict (code) do nothing
+-- keeps this idempotent across reseeds, same as the block above.
+-- ---------------------------------------------------------------------
+
+insert into product_categories (code, name_nl, name_en) values
+  ('isolatiematerialen', 'Isolatiematerialen', 'Insulation materials')
+on conflict (code) do nothing;
+
+insert into product_categories (code, name_nl, name_en, parent_id) values
+  ('steenwol', 'Steenwol', 'Mineral/rock wool',
+   (select id from product_categories where code = 'isolatiematerialen'))
+on conflict (code) do nothing;
+
+insert into product_categories (code, name_nl, name_en, parent_id) values
+  ('brandwerende_steenwol', 'Brandwerende steenwol (brandstopping)', 'Fire-resistant mineral wool (firestopping)',
+   (select id from product_categories where code = 'steenwol'))
+on conflict (code) do nothing;
+
+-- ---------------------------------------------------------------------
 -- Prompt library — one prompt per use case from the brief's own example
 -- list. use_case is the stable slug; prompt_text is what actually gets
 -- fed to an AI assistant during a benchmark run (Phase 2).
