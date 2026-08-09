@@ -32,17 +32,30 @@ Usage:
     python -m ingest.cli review list
     python -m ingest.cli review promote <id> --key water_resistance_class
     python -m ingest.cli review reject <id>
+
+    # Batch upload (STAP 7). No product is linked and extraction does not
+    # run -- this just gets documents in with correct provenance. --dir
+    # must contain sources.json (not a CLI flag -- see cmd_ingest_dir's
+    # docstring for why), one entry per PDF filename:
+    #   {"technical-fiche-x.pdf": {"source_url": "https://...",
+    #                               "retrieved_at": "2026-08-09",
+    #                               "kind": "datasheet"}}
+    python -m ingest.cli ingest --brand hunter-douglas --dir .\\docs\\hd\\
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import pathlib
 import sys
 
 from . import benchmark, db, pipeline, report, storage
 from .config import load_config
 from .persistence import slugify
+
+_DOCUMENT_KINDS = ["datasheet", "dop", "epd", "certificate", "test_report",
+                    "installation_manual", "brochure", "bestektekst", "bim_asset", "other"]
 
 
 def _parse_retrieved_at(value: str) -> datetime.datetime:
@@ -156,6 +169,120 @@ def cmd_upload(args: argparse.Namespace) -> int:
     print(f"done: {result}")
     conn.close()
     return 0
+
+
+def cmd_ingest_dir(args: argparse.Namespace) -> int:
+    """Batch-upload every PDF in a directory (STAP 7). No per-file
+    --source-url/--retrieved-at flags exist on this command -- with
+    potentially dozens of files, that isn't a CLI-flag-shaped problem.
+    Instead the directory must contain a sources.json manifest, keyed by
+    filename, with the same two mandatory fields STAP 6 requires for a
+    single upload (plus optional "kind"/"title" per file). This is a
+    design choice, not something the brief specified -- flagged here and
+    in the response to the person running this.
+
+    No product is linked (there's no --product-slug here either, and one
+    file rarely maps to exactly one product for a manufacturer's whole
+    catalog) -- extraction is intentionally not run; documents just land
+    with correct, mandatory provenance, ready to be linked and extracted
+    later once a real product/category exists for them.
+    """
+    config = load_config()
+    conn = db.connect(config.database_url)
+    client = storage.make_client(config.supabase_url, config.supabase_service_role_key)
+
+    brand = db.get_brand_by_slug(conn, args.brand)
+    if brand is None:
+        print(f"no brand with slug '{args.brand}' -- create it in the portal/dashboard first")
+        return 1
+
+    directory = pathlib.Path(args.dir)
+    if not directory.is_dir():
+        print(f"'{args.dir}' is not a directory")
+        return 1
+
+    manifest_path = directory / "sources.json"
+    if not manifest_path.exists():
+        print(f"no sources.json in '{args.dir}' -- every file needs a source_url and retrieved_at "
+              f"entry there (same two fields --source-url/--retrieved-at require for a single upload), "
+              f"e.g.:\n"
+              f'  {{"datasheet.pdf": {{"source_url": "https://...", "retrieved_at": "2026-08-09", '
+              f'"kind": "datasheet"}}}}')
+        return 1
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"sources.json is not valid JSON: {exc}")
+        return 1
+
+    pdf_paths = sorted(directory.glob("*.pdf"))
+    if not pdf_paths:
+        print(f"no PDFs found in '{args.dir}'")
+        return 0
+
+    processed: list[str] = []
+    rejected: list[str] = []
+
+    for path in pdf_paths:
+        entry = manifest.get(path.name)
+        if entry is None:
+            rejected.append(f"{path.name}: no entry in sources.json")
+            continue
+
+        source_url = (entry.get("source_url") or "").strip()
+        if not source_url:
+            rejected.append(f"{path.name}: sources.json entry has no source_url")
+            continue
+
+        retrieved_at_raw = entry.get("retrieved_at")
+        if not retrieved_at_raw:
+            rejected.append(f"{path.name}: sources.json entry has no retrieved_at")
+            continue
+        try:
+            retrieved_at = _parse_retrieved_at(retrieved_at_raw)
+        except ValueError as exc:
+            rejected.append(f"{path.name}: {exc}")
+            continue
+
+        kind = entry.get("kind", "datasheet")
+        if kind not in _DOCUMENT_KINDS:
+            rejected.append(f"{path.name}: kind {kind!r} in sources.json isn't one of {_DOCUMENT_KINDS}")
+            continue
+
+        data = path.read_bytes()
+        sha256 = storage.sha256_bytes(data)
+
+        existing_version = db.find_version_by_sha256(conn, sha256)
+        if existing_version:
+            processed.append(f"{path.name}: already uploaded as document_version "
+                              f"{existing_version['id']} -- skipped, not re-uploaded")
+            continue
+
+        document_id = db.create_document(
+            conn, organization_id=brand["organization_id"], product_id=None,
+            title=entry.get("title") or path.stem, kind=kind,
+        )
+        path_in_bucket = storage.storage_path(args.brand, sha256, ext=path.suffix.lstrip(".") or "pdf")
+        storage.upload(client, path_in_bucket, data)
+        document_version_id = db.create_document_version(
+            conn, document_id=document_id, storage_path=path_in_bucket,
+            original_filename=path.name, mime_type="application/pdf", byte_size=len(data),
+            sha256=sha256, uploaded_by=None, source_url=source_url, retrieved_at=retrieved_at,
+        )
+        conn.commit()
+        processed.append(f"{path.name}: uploaded as document_version {document_version_id} "
+                          f"(document {document_id}, kind={kind}, no product linked -- extraction not run)")
+
+    conn.close()
+
+    print(f"--- {len(processed)}/{len(pdf_paths)} processed ---")
+    for line in processed:
+        print(f"  OK    {line}")
+    print(f"--- {len(rejected)}/{len(pdf_paths)} rejected ---")
+    for line in rejected:
+        print(f"  SKIP  {line}")
+
+    return 1 if rejected else 0
 
 
 def cmd_generate_report(args: argparse.Namespace) -> int:
@@ -286,15 +413,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("--org-slug", required=True)
     p_upload.add_argument("--product-slug", default=None, help="omit only for a brand-new document")
     p_upload.add_argument("--document-id", default=None, help="add a new version to this existing document")
-    p_upload.add_argument("--kind", default="datasheet",
-                           choices=["datasheet", "dop", "epd", "certificate", "test_report",
-                                    "installation_manual", "brochure", "bestektekst", "bim_asset", "other"])
+    p_upload.add_argument("--kind", default="datasheet", choices=_DOCUMENT_KINDS)
     p_upload.add_argument("--title", default=None)
     p_upload.add_argument("--source-url", required=True,
                            help="where this file was fetched from -- mandatory, no anonymous documents")
     p_upload.add_argument("--retrieved-at", required=True,
                            help="ISO 8601 datetime this file was actually fetched, e.g. 2026-08-09")
     p_upload.set_defaults(func=cmd_upload)
+
+    p_ingest_dir = sub.add_parser("ingest", help="batch-upload every PDF in a directory (STAP 7)")
+    p_ingest_dir.add_argument("--brand", required=True, help="brand slug; its organization owns the documents")
+    p_ingest_dir.add_argument("--dir", required=True, help="directory of PDFs, must contain sources.json")
+    p_ingest_dir.set_defaults(func=cmd_ingest_dir)
 
     p_report = sub.add_parser("generate-report", help="generate a data-coverage report for a brand")
     p_report.add_argument("--brand-slug", required=True)
