@@ -2,7 +2,7 @@
 append-only claims/supersede bookkeeping is checked against the actual
 constraints, not a mock."""
 from ingest import db
-from ingest.persistence import persist_extracted_products, slugify
+from ingest.persistence import PersistStats, persist_extracted_products, persist_unmapped_findings, slugify
 
 
 def _spec_attrs_by_key(conn):
@@ -411,3 +411,51 @@ def test_persist_supersedes_changed_claim_value(conn):
     assert old["superseded_by"] == new["id"]
     assert new["is_current"] is True
     assert new["value_numeric"] == 90
+
+
+def test_persist_unmapped_findings_queues_verified_ones_and_drops_uncited(conn):
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="theta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-theta"))
+        placeholder_product_id = cur.fetchone()["id"]
+    _, version_id = _make_document(conn, org_id, placeholder_product_id, "5" * 64)
+
+    page_text = "Water resistant: yes. Corrosiveness to Steel - Passed."
+    findings = [
+        {"found_term": "water_resistant", "page_number": 1, "source_snippet": "Water resistant: yes."},
+        # not actually on the page -- must be dropped, not queued as-is
+        {"found_term": "fabricated", "page_number": 1, "source_snippet": "This sentence is not on the page."},
+    ]
+
+    stats = PersistStats()
+    persist_unmapped_findings(
+        conn, document_version_id=version_id, findings=findings,
+        get_page_text=lambda p: page_text, stats=stats,
+    )
+
+    assert stats.unmapped_findings_queued == 1
+    assert stats.unmapped_findings_rejected == 1
+    assert "fabricated" in stats.rejections[0]
+
+    with conn.cursor() as cur:
+        cur.execute("select found_term, source_snippet, status, page_number from review_queue "
+                     "where document_version_id = %s", (version_id,))
+        rows = cur.fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["found_term"] == "water_resistant"
+    assert rows[0]["status"] == "new"
+    assert rows[0]["page_number"] == 1
+
+
+def test_persist_unmapped_findings_never_creates_a_claim():
+    # The structural guarantee STAP 4 asks for: nothing in this path ever
+    # touches the claims table, so review_queue rows can never be counted
+    # by report.py's coverage query. Verified by inspecting the function's
+    # only DB call rather than needing a live connection for this one.
+    import inspect
+
+    source = inspect.getsource(persist_unmapped_findings)
+    assert "insert_claim" not in source
+    assert "insert_review_queue_entry" in source

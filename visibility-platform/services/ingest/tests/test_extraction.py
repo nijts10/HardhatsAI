@@ -1,6 +1,6 @@
 import json
 
-from ingest.extraction import build_prompt, extract_claims, spec_attributes_for_category
+from ingest.extraction import ExtractionResult, build_prompt, extract_claims, spec_attributes_for_category
 
 
 class _FakeToolUseBlock:
@@ -17,18 +17,22 @@ class _FakeMessage:
 
 
 class _FakeMessagesAPI:
-    def __init__(self, response_products):
+    def __init__(self, response_products, response_unmapped_findings=None):
         self._response_products = response_products
+        self._response_unmapped_findings = response_unmapped_findings if response_unmapped_findings is not None else []
         self.last_kwargs = None
 
     def create(self, **kwargs):
         self.last_kwargs = kwargs
-        return _FakeMessage([_FakeToolUseBlock({"products": self._response_products})])
+        return _FakeMessage([_FakeToolUseBlock({
+            "products": self._response_products,
+            "unmapped_findings": self._response_unmapped_findings,
+        })])
 
 
 class _FakeClient:
-    def __init__(self, response_products):
-        self.messages = _FakeMessagesAPI(response_products)
+    def __init__(self, response_products, response_unmapped_findings=None):
+        self.messages = _FakeMessagesAPI(response_products, response_unmapped_findings)
 
 
 SPEC_ATTRS = [
@@ -88,6 +92,7 @@ def test_build_prompt_includes_vocabulary_brand_name_and_forbids_invented_keys()
     assert "Acme" in prompt
     assert "ONLY use these keys" in prompt
     assert "Brandwerendheid EI 60" in prompt
+    assert "unmapped_findings" in prompt
 
 
 def test_extract_claims_passes_variants_through_untouched():
@@ -112,8 +117,8 @@ def test_extract_claims_passes_variants_through_untouched():
         chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
     )
 
-    assert result == fake_products
-    assert [v["label"] for v in result[0]["variants"]] == ["40mm", "80mm"]
+    assert result.products == fake_products
+    assert [v["label"] for v in result.products[0]["variants"]] == ["40mm", "80mm"]
 
 
 def test_extract_claims_returns_tool_input_and_forces_tool_choice():
@@ -131,9 +136,26 @@ def test_extract_claims_returns_tool_input_and_forces_tool_choice():
         chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "EI 60"}],
     )
 
-    assert result == fake_products
+    assert result.products == fake_products
+    assert result.unmapped_findings == []
     assert client.messages.last_kwargs["tool_choice"] == {"type": "tool", "name": "emit_products"}
     assert client.messages.last_kwargs["tools"][0]["name"] == "emit_products"
+
+
+def test_extract_claims_returns_unmapped_findings():
+    fake_findings = [
+        {"found_term": "water_resistant", "page_number": 3, "source_snippet": "Water resistant: yes"},
+        {"found_term": "corrosion_resistance", "page_number": 2, "source_snippet": "Corrosiveness to Steel - Passed"},
+    ]
+    client = _FakeClient([], fake_findings)
+
+    result = extract_claims(
+        client, model="claude-sonnet-5", brand_name="Acme",
+        spec_attributes=SPEC_ATTRS,
+        chunks=[{"id": "c1", "page_start": 1, "page_end": 3, "heading_path": [], "content": "n/a"}],
+    )
+
+    assert result.unmapped_findings == fake_findings
 
 
 def test_extract_claims_unwraps_double_encoded_products_string():
@@ -145,15 +167,26 @@ def test_extract_claims_unwraps_double_encoded_products_string():
         "claims": [{"key": "demountable", "presence": "not_stated"}],
         "certifications": [],
     }]
-    client = _FakeClient(json.dumps({"products": fake_products}))
+
+    class _RawInputToolUseBlock:
+        type = "tool_use"
+        name = "emit_products"
+        input = {"products": json.dumps({"products": fake_products}), "unmapped_findings": []}
+
+    class _RawInputMessagesAPI:
+        def create(self, **kwargs):
+            return _FakeMessage([_RawInputToolUseBlock()])
+
+    class _RawInputClient:
+        messages = _RawInputMessagesAPI()
 
     result = extract_claims(
-        client, model="claude-sonnet-5", brand_name="Rockwool",
+        _RawInputClient(), model="claude-sonnet-5", brand_name="Rockwool",
         spec_attributes=SPEC_ATTRS,
         chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
     )
 
-    assert result == fake_products
+    assert result.products == fake_products
 
 
 def test_extract_claims_unwraps_double_encoded_bare_array_string():
@@ -161,18 +194,29 @@ def test_extract_claims_unwraps_double_encoded_bare_array_string():
         "name": "ROXUL Safe", "manufacturer_ref": None,
         "claims": [], "certifications": [],
     }]
-    client = _FakeClient(json.dumps(fake_products))
+
+    class _RawInputToolUseBlock:
+        type = "tool_use"
+        name = "emit_products"
+        input = {"products": json.dumps(fake_products), "unmapped_findings": []}
+
+    class _RawInputMessagesAPI:
+        def create(self, **kwargs):
+            return _FakeMessage([_RawInputToolUseBlock()])
+
+    class _RawInputClient:
+        messages = _RawInputMessagesAPI()
 
     result = extract_claims(
-        client, model="claude-sonnet-5", brand_name="Rockwool",
+        _RawInputClient(), model="claude-sonnet-5", brand_name="Rockwool",
         spec_attributes=SPEC_ATTRS,
         chunks=[{"id": "c1", "page_start": 1, "page_end": 1, "heading_path": [], "content": "n/a"}],
     )
 
-    assert result == fake_products
+    assert result.products == fake_products
 
 
-def test_extract_claims_returns_empty_list_when_no_tool_use_block():
+def test_extract_claims_returns_empty_result_when_no_tool_use_block():
     class _NoToolMessage:
         content = []
 
@@ -187,4 +231,4 @@ def test_extract_claims_returns_empty_list_when_no_tool_use_block():
         _NoToolClient(), model="claude-sonnet-5", brand_name="Acme",
         spec_attributes=SPEC_ATTRS, chunks=[],
     )
-    assert result == []
+    assert result == ExtractionResult(products=[], unmapped_findings=[])

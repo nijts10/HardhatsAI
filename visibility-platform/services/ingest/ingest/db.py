@@ -276,6 +276,12 @@ def get_spec_attributes(conn: psycopg.Connection) -> list[dict]:
         return cur.fetchall()
 
 
+def get_spec_attribute_by_key(conn: psycopg.Connection, key: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute("select * from spec_attributes where key = %s", (key,))
+        return cur.fetchone()
+
+
 # ---------------------------------------------------------------------
 # Extraction runs
 # ---------------------------------------------------------------------
@@ -379,3 +385,54 @@ def insert_certification(conn: psycopg.Connection, cert: dict) -> str:
             cert,
         )
         return cur.fetchone()["id"]
+
+
+# ---------------------------------------------------------------------
+# Review queue -- found-but-undefined specs, never claims (see
+# 0011_review_queue.sql for why that's structural, not conventional)
+# ---------------------------------------------------------------------
+
+def insert_review_queue_entry(
+    conn: psycopg.Connection, *, found_term: str, source_snippet: str,
+    document_version_id: str, page_number: int,
+) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into review_queue (found_term, source_snippet, document_version_id, page_number)
+            values (%s, %s, %s, %s)
+            returning id
+            """,
+            (found_term, source_snippet, document_version_id, page_number),
+        )
+        return cur.fetchone()["id"]
+
+
+def list_review_queue(conn: psycopg.Connection, status: Optional[str] = None) -> list[dict]:
+    with conn.cursor() as cur:
+        if status:
+            cur.execute(
+                "select * from review_queue where status = %s order by created_at", (status,)
+            )
+        else:
+            cur.execute("select * from review_queue order by created_at")
+        return cur.fetchall()
+
+
+def get_review_queue_entry(conn: psycopg.Connection, entry_id: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute("select * from review_queue where id = %s", (entry_id,))
+        return cur.fetchone()
+
+
+def promote_review_queue_entry(conn: psycopg.Connection, entry_id: str, spec_key: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "update review_queue set status = 'promoted', promoted_to_key = %s where id = %s",
+            (spec_key, entry_id),
+        )
+
+
+def reject_review_queue_entry(conn: psycopg.Connection, entry_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("update review_queue set status = 'rejected' where id = %s", (entry_id,))

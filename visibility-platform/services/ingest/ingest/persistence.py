@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import psycopg
 
 from . import db
-from .verification import verify_claim
+from .verification import snippet_in_page, verify_claim
 
 
 def slugify(*parts: str | None) -> str:
@@ -29,6 +29,8 @@ class PersistStats:
     claims_superseded: int = 0
     claims_rejected: int = 0
     certifications_inserted: int = 0
+    unmapped_findings_queued: int = 0
+    unmapped_findings_rejected: int = 0
     rejections: list[str] = field(default_factory=list)
 
 
@@ -194,3 +196,34 @@ def persist_extracted_products(
             stats.certifications_inserted += 1
 
     return stats
+
+
+def persist_unmapped_findings(
+    conn: psycopg.Connection, *, document_version_id: str, findings: list[dict],
+    get_page_text, stats: PersistStats,
+) -> None:
+    """Facts the extractor found but couldn't map to any spec_attributes
+    key. Same anti-hallucination bar as a claim -- source_snippet must
+    genuinely appear on the cited page -- but there's no spec_attribute to
+    verify a value/type/plausibility against (that's the whole point: one
+    doesn't exist yet), so this only does the citation check, via
+    review_queue rather than claims. A finding that fails verification is
+    dropped the same way an uncited claim is, not queued as unverifiable --
+    the review queue is for "not yet defined", not "not yet grounded"."""
+    for finding in findings:
+        page_number = finding.get("page_number")
+        snippet = finding.get("source_snippet")
+        page_text = get_page_text(page_number) if page_number else None
+
+        if not snippet or page_number is None or page_text is None or not snippet_in_page(snippet, page_text):
+            stats.unmapped_findings_rejected += 1
+            stats.rejections.append(
+                f"unmapped/{finding.get('found_term')}: source_snippet not found verbatim on cited page"
+            )
+            continue
+
+        db.insert_review_queue_entry(
+            conn, found_term=finding["found_term"], source_snippet=snippet,
+            document_version_id=document_version_id, page_number=page_number,
+        )
+        stats.unmapped_findings_queued += 1

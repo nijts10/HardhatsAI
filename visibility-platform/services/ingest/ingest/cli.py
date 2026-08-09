@@ -17,6 +17,15 @@ Usage:
     # it.
     python -m ingest.cli upload path/to/datasheet-v2.pdf \\
         --org-slug acme --document-id <uuid-from-first-upload>
+
+    # A fact the extractor found but couldn't map to any spec_attributes
+    # key lands in review_queue, not claims -- triage it here. Promoting
+    # only marks the row; add the real spec_attributes row via seed.sql
+    # first (same controlled-vocabulary rule as everywhere else), then
+    # promote points the finding at it for traceability.
+    python -m ingest.cli review list
+    python -m ingest.cli review promote <id> --key water_resistance_class
+    python -m ingest.cli review reject <id>
 """
 from __future__ import annotations
 
@@ -169,6 +178,68 @@ def cmd_run_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_list(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+    entries = db.list_review_queue(conn, status=args.status)
+    conn.close()
+
+    if not entries:
+        scope = f" with status '{args.status}'" if args.status else ""
+        print(f"review queue empty{scope}")
+        return 0
+
+    for e in entries:
+        snippet = e["source_snippet"]
+        preview = snippet if len(snippet) <= 80 else snippet[:77] + "..."
+        print(f"{e['id']}  [{e['status']}]  {e['found_term']!r}  "
+              f"doc_version={e['document_version_id']} page={e['page_number']}  {preview!r}")
+    return 0
+
+
+def cmd_review_promote(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    entry = db.get_review_queue_entry(conn, args.id)
+    if entry is None:
+        print(f"no review_queue entry with id '{args.id}'")
+        return 1
+    if entry["status"] != "new":
+        print(f"entry {args.id} is already '{entry['status']}' -- not promoting")
+        return 1
+
+    spec = db.get_spec_attribute_by_key(conn, args.key)
+    if spec is None:
+        print(f"no spec_attributes key '{args.key}' -- add it to seed.sql first, same as any other new spec")
+        return 1
+
+    db.promote_review_queue_entry(conn, args.id, args.key)
+    conn.commit()
+    conn.close()
+    print(f"promoted {args.id} -> {args.key}")
+    return 0
+
+
+def cmd_review_reject(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    entry = db.get_review_queue_entry(conn, args.id)
+    if entry is None:
+        print(f"no review_queue entry with id '{args.id}'")
+        return 1
+    if entry["status"] != "new":
+        print(f"entry {args.id} is already '{entry['status']}' -- not rejecting")
+        return 1
+
+    db.reject_review_queue_entry(conn, args.id)
+    conn.commit()
+    conn.close()
+    print(f"rejected {args.id}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ingest")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -200,6 +271,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_benchmark.add_argument("--brand-slug", required=True)
     p_benchmark.add_argument("--model", required=True, choices=["chatgpt", "gemini"])
     p_benchmark.set_defaults(func=cmd_run_benchmark)
+
+    p_review = sub.add_parser("review", help="triage found-but-undefined specs")
+    review_sub = p_review.add_subparsers(dest="review_command", required=True)
+
+    p_review_list = review_sub.add_parser("list", help="list review queue entries")
+    p_review_list.add_argument("--status", default=None, choices=["new", "promoted", "rejected"],
+                                help="omit to list all statuses")
+    p_review_list.set_defaults(func=cmd_review_list)
+
+    p_review_promote = review_sub.add_parser(
+        "promote", help="mark an entry as promoted to a real spec_attributes key"
+    )
+    p_review_promote.add_argument("id")
+    p_review_promote.add_argument("--key", required=True, help="must already exist in spec_attributes")
+    p_review_promote.set_defaults(func=cmd_review_promote)
+
+    p_review_reject = review_sub.add_parser("reject", help="reject an entry")
+    p_review_reject.add_argument("id")
+    p_review_reject.set_defaults(func=cmd_review_reject)
 
     return parser
 

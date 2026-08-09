@@ -153,3 +153,50 @@ def test_extraction_run_lifecycle(conn):
     assert row["status"] == "succeeded"
     assert row["stats"]["claims"] == 3
     assert row["finished_at"] is not None
+
+
+def test_review_queue_lifecycle(conn):
+    org_id = _make_org(conn, slug="iota")
+    document_id = db.create_document(conn, organization_id=org_id, product_id=None, title=None, kind="datasheet")
+    version_id = db.create_document_version(
+        conn, document_id=document_id, storage_path="iota/aa/doc.pdf", original_filename="doc.pdf",
+        mime_type="application/pdf", byte_size=1, sha256="d" * 64, uploaded_by=None,
+    )
+
+    entry_id = db.insert_review_queue_entry(
+        conn, found_term="water_resistant", source_snippet="Water resistant: yes",
+        document_version_id=version_id, page_number=3,
+    )
+
+    entry = db.get_review_queue_entry(conn, entry_id)
+    assert entry["status"] == "new"
+    assert entry["found_term"] == "water_resistant"
+    assert entry["promoted_to_key"] is None
+
+    assert [e["id"] for e in db.list_review_queue(conn, status="new")] == [entry_id]
+    assert db.list_review_queue(conn, status="rejected") == []
+
+    assert db.get_spec_attribute_by_key(conn, "thickness_mm") is not None
+    assert db.get_spec_attribute_by_key(conn, "not_a_real_key") is None
+
+    db.promote_review_queue_entry(conn, entry_id, "thickness_mm")
+    promoted = db.get_review_queue_entry(conn, entry_id)
+    assert promoted["status"] == "promoted"
+    assert promoted["promoted_to_key"] == "thickness_mm"
+
+
+def test_review_queue_reject(conn):
+    org_id = _make_org(conn, slug="kappa")
+    document_id = db.create_document(conn, organization_id=org_id, product_id=None, title=None, kind="datasheet")
+    version_id = db.create_document_version(
+        conn, document_id=document_id, storage_path="kappa/aa/doc.pdf", original_filename="doc.pdf",
+        mime_type="application/pdf", byte_size=1, sha256="e" * 64, uploaded_by=None,
+    )
+    entry_id = db.insert_review_queue_entry(
+        conn, found_term="irrelevant_note", source_snippet="Some irrelevant note",
+        document_version_id=version_id, page_number=1,
+    )
+
+    db.reject_review_queue_entry(conn, entry_id)
+
+    assert db.get_review_queue_entry(conn, entry_id)["status"] == "rejected"

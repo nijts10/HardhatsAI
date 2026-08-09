@@ -14,7 +14,7 @@ from .config import Config
 from .embedding import Embedder
 from .extraction import PARSER_VERSION, PROMPT_VERSION, extract_claims, spec_attributes_for_category
 from .parsing import claude_vision_extractor, parse_pdf
-from .persistence import persist_extracted_products
+from .persistence import persist_extracted_products, persist_unmapped_findings
 
 
 def run(conn, config: Config, *, document_version_id: str) -> dict:
@@ -89,8 +89,12 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
     stats = persist_extracted_products(
         conn, brand_id=product_row["brand_id"], category_id=product_row["category_id"],
         document_version_id=document_version_id, extraction_run_id=run_id,
-        extracted_products=extracted, spec_attrs_by_key=spec_attrs_by_key,
+        extracted_products=extracted.products, spec_attrs_by_key=spec_attrs_by_key,
         document_chunks=all_chunks, get_page_text=get_page_text,
+    )
+    persist_unmapped_findings(
+        conn, document_version_id=document_version_id, findings=extracted.unmapped_findings,
+        get_page_text=get_page_text, stats=stats,
     )
 
     db.finish_extraction_run(
@@ -101,6 +105,8 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
             "claims_superseded": stats.claims_superseded,
             "claims_rejected": stats.claims_rejected,
             "certifications_inserted": stats.certifications_inserted,
+            "unmapped_findings_queued": stats.unmapped_findings_queued,
+            "unmapped_findings_rejected": stats.unmapped_findings_rejected,
             "rejections": stats.rejections,
         },
     )
@@ -111,4 +117,5 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
         "products": stats.products_created_or_updated,
         "claims_inserted": stats.claims_inserted,
         "claims_rejected": stats.claims_rejected,
+        "unmapped_findings_queued": stats.unmapped_findings_queued,
     }

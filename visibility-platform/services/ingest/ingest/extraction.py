@@ -7,6 +7,7 @@ value or as presence='not_stated'.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from anthropic import Anthropic
@@ -57,6 +58,19 @@ _CERTIFICATION_SCHEMA = {
     "required": ["scheme"],
 }
 
+# A fact the model finds that doesn't map to any spec_attributes key.
+# Document-level, not per-product -- see 0011_review_queue.sql. Feeds
+# review_queue, never claims, so it structurally can't affect coverage.
+_UNMAPPED_FINDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "found_term": {"type": "string"},
+        "page_number": {"type": "integer"},
+        "source_snippet": {"type": "string"},
+    },
+    "required": ["found_term", "page_number", "source_snippet"],
+}
+
 _TOOL = {
     "name": _TOOL_NAME,
     "description": "Emit the products, claims, and certifications found in this document.",
@@ -77,10 +91,17 @@ _TOOL = {
                     "required": ["name", "claims"],
                 },
             },
+            "unmapped_findings": {"type": "array", "items": _UNMAPPED_FINDING_SCHEMA},
         },
         "required": ["products"],
     },
 }
+
+
+@dataclass
+class ExtractionResult:
+    products: list[dict[str, Any]]
+    unmapped_findings: list[dict[str, Any]]
 
 
 def spec_attributes_for_category(spec_attributes: list[dict], applicable_codes: list[str] | None) -> list[dict]:
@@ -156,13 +177,11 @@ Rules:
 5. Also emit any certifications found (CE, KOMO, BREEAM, DoP, EPD, FSC, ...)
    with their scheme, number, issuer, page and a verbatim snippet.
 6. Do not invent a new key for a fact that doesn't match the vocabulary
-   above. Instead, flag it for human review: emit it as its own claims
-   entry using key "application_area", presence 'stated', with value_text
-   starting with "[UNMAPPED: <short label>]" followed by a brief
-   description, and its own real page_number and verbatim source_snippet
-   for that specific fact. If you find several such facts, emit one
-   "application_area" entry per fact rather than combining them into one —
-   this is a temporary holding place, not the fact's real home.
+   above. Instead, flag it for human review: add an entry to the
+   top-level unmapped_findings array with a short found_term label, the
+   real page_number, and a verbatim source_snippet (same verbatim rule as
+   #3) for that specific fact. One entry per distinct fact — do not
+   combine several into one.
 7. If the document gives DIFFERENT measured values for different variants
    of the same product (e.g. performance that changes by thickness), do
    NOT force one value onto the product or silently pick one. Emit a
@@ -183,7 +202,7 @@ Call {_TOOL_NAME} with every product you found."""
 def extract_claims(
     client: Anthropic, *, model: str, brand_name: str,
     spec_attributes: list[dict], chunks: list[dict],
-) -> list[dict[str, Any]]:
+) -> ExtractionResult:
     prompt = build_prompt(brand_name=brand_name, spec_attributes=spec_attributes, chunks=chunks)
 
     message = client.messages.create(
@@ -196,18 +215,22 @@ def extract_claims(
 
     for block in message.content:
         if block.type == "tool_use" and block.name == _TOOL_NAME:
-            return _coerce_products(block.input.get("products", []))
-    return []
+            return ExtractionResult(
+                products=_coerce_array(block.input.get("products", []), wrapper_key="products"),
+                unmapped_findings=_coerce_array(
+                    block.input.get("unmapped_findings", []), wrapper_key="unmapped_findings"
+                ),
+            )
+    return ExtractionResult(products=[], unmapped_findings=[])
 
 
-def _coerce_products(products: Any) -> list[dict[str, Any]]:
-    """Observed in the wild: the model sometimes double-encodes the array,
-    returning a JSON string (of either the bare array or the whole
-    {"products": [...]} object) in the "products" field instead of
-    structured content matching the declared tool schema. Parse it back
-    rather than let a string reach persistence, where iterating over it
-    yields characters, not product dicts."""
-    if isinstance(products, str):
-        parsed = json.loads(products)
-        products = parsed.get("products", parsed) if isinstance(parsed, dict) else parsed
-    return products
+def _coerce_array(value: Any, *, wrapper_key: str) -> list[dict[str, Any]]:
+    """Observed in the wild: the model sometimes double-encodes an array
+    field, returning a JSON string (of either the bare array or the whole
+    wrapping object) instead of structured content matching the declared
+    tool schema. Parse it back rather than let a string reach persistence,
+    where iterating over it yields characters, not dicts."""
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        value = parsed.get(wrapper_key, parsed) if isinstance(parsed, dict) else parsed
+    return value
