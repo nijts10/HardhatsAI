@@ -48,8 +48,9 @@ def _make_document_version(conn, org_id, product_id):
         )
         document_id = cur.fetchone()["id"]
         cur.execute(
-            "insert into document_versions (document_id, storage_path, sha256) values (%s, 'x', %s) returning id",
-            (document_id, "e" * 64),
+            "insert into document_versions (document_id, storage_path, sha256, source_url, retrieved_at) "
+            "values (%s, 'x', %s, %s, %s) returning id",
+            (document_id, "e" * 64, "https://example.com/test-datasheet.pdf", "2026-01-01T00:00:00+00:00"),
         )
         return cur.fetchone()["id"]
 

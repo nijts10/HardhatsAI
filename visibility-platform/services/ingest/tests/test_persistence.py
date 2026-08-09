@@ -28,9 +28,10 @@ def _make_document(conn, org_id, product_id, sha256):
         )
         document_id = cur.fetchone()["id"]
         cur.execute(
-            "insert into document_versions (document_id, storage_path, sha256, uploaded_by) "
-            "values (%s, %s, %s, null) returning id",
-            (document_id, f"acme/{sha256[:2]}/doc.pdf", sha256),
+            "insert into document_versions (document_id, storage_path, sha256, uploaded_by, source_url, retrieved_at) "
+            "values (%s, %s, %s, null, %s, %s) returning id",
+            (document_id, f"acme/{sha256[:2]}/doc.pdf", sha256,
+             "https://example.com/test-datasheet.pdf", "2026-01-01T00:00:00+00:00"),
         )
         version_id = cur.fetchone()["id"]
     return document_id, version_id

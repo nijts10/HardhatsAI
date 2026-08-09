@@ -3,6 +3,11 @@ import pytest
 from ingest import db
 from ingest.config import EMBEDDING_DIMENSIONS
 
+# STAP 6: document_versions.source_url/retrieved_at are now required --
+# a fixed stand-in for tests that aren't specifically testing provenance.
+_SOURCE_URL = "https://example.com/test-datasheet.pdf"
+_RETRIEVED_AT = "2026-01-01T00:00:00+00:00"
+
 
 def _make_org(conn, slug="acme"):
     with conn.cursor() as cur:
@@ -65,7 +70,7 @@ def test_document_and_version_lifecycle(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="acme/aa/doc.pdf",
         original_filename="doc.pdf", mime_type="application/pdf", byte_size=100,
-        sha256="a" * 64, uploaded_by=None,
+        sha256="a" * 64, uploaded_by=None, source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
     assert db.find_version_by_sha256(conn, "a" * 64)["id"] == version_id
 
@@ -85,6 +90,7 @@ def test_page_and_chunk_lifecycle(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="acme/aa/doc.pdf", original_filename="doc.pdf",
         mime_type="application/pdf", byte_size=1, sha256="b" * 64, uploaded_by=None,
+        source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
 
     db.insert_page(conn, version_id, 1, "hello world", {"words": []})
@@ -116,6 +122,7 @@ def test_document_chunks_embedding_column_enforces_config_dimensions(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="dimcheck/aa/doc.pdf", original_filename="doc.pdf",
         mime_type="application/pdf", byte_size=1, sha256="e" * 64, uploaded_by=None,
+        source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
     chunk_id = db.insert_chunk(
         conn, document_version_id=version_id, chunk_index=0, page_start=1, page_end=1,
@@ -141,6 +148,7 @@ def test_extraction_run_lifecycle(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="acme/aa/doc.pdf", original_filename="doc.pdf",
         mime_type="application/pdf", byte_size=1, sha256="c" * 64, uploaded_by=None,
+        source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
 
     run_id = db.start_extraction_run(conn, document_version_id=version_id, parser_version="1",
@@ -161,6 +169,7 @@ def test_review_queue_lifecycle(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="iota/aa/doc.pdf", original_filename="doc.pdf",
         mime_type="application/pdf", byte_size=1, sha256="d" * 64, uploaded_by=None,
+        source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
 
     entry_id = db.insert_review_queue_entry(
@@ -191,6 +200,7 @@ def test_review_queue_reject(conn):
     version_id = db.create_document_version(
         conn, document_id=document_id, storage_path="kappa/aa/doc.pdf", original_filename="doc.pdf",
         mime_type="application/pdf", byte_size=1, sha256="e" * 64, uploaded_by=None,
+        source_url=_SOURCE_URL, retrieved_at=_RETRIEVED_AT,
     )
     entry_id = db.insert_review_queue_entry(
         conn, found_term="irrelevant_note", source_snippet="Some irrelevant note",

@@ -142,17 +142,19 @@ def create_document(
 def create_document_version(
     conn: psycopg.Connection, *, document_id: str, storage_path: str,
     original_filename: Optional[str], mime_type: Optional[str], byte_size: int,
-    sha256: str, uploaded_by: Optional[str],
+    sha256: str, uploaded_by: Optional[str], source_url: str, retrieved_at,
 ) -> str:
     with conn.cursor() as cur:
         cur.execute(
             """
             insert into document_versions
-              (document_id, storage_path, original_filename, mime_type, byte_size, sha256, uploaded_by)
-            values (%s, %s, %s, %s, %s, %s, %s)
+              (document_id, storage_path, original_filename, mime_type, byte_size, sha256, uploaded_by,
+               source_url, retrieved_at)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             returning id
             """,
-            (document_id, storage_path, original_filename, mime_type, byte_size, sha256, uploaded_by),
+            (document_id, storage_path, original_filename, mime_type, byte_size, sha256, uploaded_by,
+             source_url, retrieved_at),
         )
         return cur.fetchone()["id"]
 

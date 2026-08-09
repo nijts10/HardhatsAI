@@ -6,7 +6,9 @@ Usage:
 
     python -m ingest.cli upload path/to/datasheet.pdf \\
         --org-slug acme --product-slug acme-211 --kind datasheet \\
-        --title "Acme 211 datasheet"
+        --title "Acme 211 datasheet" \\
+        --source-url https://acme.example/downloads/211-datasheet.pdf \\
+        --retrieved-at 2026-08-09
 
     # A revised datasheet for the SAME logical document is a new version,
     # not a new document -- pass --document-id to say so explicitly. There
@@ -14,9 +16,13 @@ Usage:
     # brief's immutability principle only says a re-upload creates a new
     # version, it doesn't say how to detect "this is a re-upload" from
     # bytes alone (different content, by definition), so the caller states
-    # it.
+    # it. --source-url/--retrieved-at are mandatory again here too -- a
+    # revised version can genuinely come from a different URL/time than
+    # the original.
     python -m ingest.cli upload path/to/datasheet-v2.pdf \\
-        --org-slug acme --document-id <uuid-from-first-upload>
+        --org-slug acme --document-id <uuid-from-first-upload> \\
+        --source-url https://acme.example/downloads/211-datasheet-v2.pdf \\
+        --retrieved-at 2026-09-01
 
     # A fact the extractor found but couldn't map to any spec_attributes
     # key lands in review_queue, not claims -- triage it here. Promoting
@@ -30,12 +36,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import pathlib
 import sys
 
 from . import benchmark, db, pipeline, report, storage
 from .config import load_config
 from .persistence import slugify
+
+
+def _parse_retrieved_at(value: str) -> datetime.datetime:
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"--retrieved-at {value!r} isn't a valid ISO 8601 datetime "
+            f"(e.g. 2026-08-09 or 2026-08-09T10:00:00+02:00)"
+        ) from exc
 
 
 def cmd_create_product(args: argparse.Namespace) -> int:
@@ -64,6 +81,19 @@ def cmd_create_product(args: argparse.Namespace) -> int:
 
 
 def cmd_upload(args: argparse.Namespace) -> int:
+    # STAP 6: no document without a stated source and retrieval time --
+    # argparse's required=True already refuses a bare-missing flag, but
+    # catches an explicitly-blank one too (--source-url "" would otherwise
+    # slip through as "present").
+    if not args.source_url or not args.source_url.strip():
+        print("--source-url is required and cannot be empty -- ingest refuses a document with no stated source")
+        return 1
+    try:
+        retrieved_at = _parse_retrieved_at(args.retrieved_at)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
     config = load_config()
     conn = db.connect(config.database_url)
     client = storage.make_client(config.supabase_url, config.supabase_service_role_key)
@@ -104,7 +134,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
     document_version_id = db.create_document_version(
         conn, document_id=document_id, storage_path=path_in_bucket,
         original_filename=path.name, mime_type="application/pdf", byte_size=len(data),
-        sha256=sha256, uploaded_by=None,
+        sha256=sha256, uploaded_by=None, source_url=args.source_url, retrieved_at=retrieved_at,
     )
     conn.commit()
     print(f"uploaded document_version {document_version_id} (document {document_id})")
@@ -260,6 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
                            choices=["datasheet", "dop", "epd", "certificate", "test_report",
                                     "installation_manual", "brochure", "bestektekst", "bim_asset", "other"])
     p_upload.add_argument("--title", default=None)
+    p_upload.add_argument("--source-url", required=True,
+                           help="where this file was fetched from -- mandatory, no anonymous documents")
+    p_upload.add_argument("--retrieved-at", required=True,
+                           help="ISO 8601 datetime this file was actually fetched, e.g. 2026-08-09")
     p_upload.set_defaults(func=cmd_upload)
 
     p_report = sub.add_parser("generate-report", help="generate a data-coverage report for a brand")
