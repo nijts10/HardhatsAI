@@ -489,6 +489,40 @@ def resolve_product_by_name(conn: psycopg.Connection, name: str) -> Optional[dic
         return cur.fetchone()
 
 
+def set_product_url(conn: psycopg.Connection, product_id: str, product_url: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("update products set product_url = %s where id = %s", (product_url, product_id))
+
+
+def set_brand_website(conn: psycopg.Connection, brand_id: str, website: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("update brands set website = %s where id = %s", (website, brand_id))
+
+
+def get_products_for_brand(conn: psycopg.Connection, brand_id: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("select * from products where brand_id = %s order by name", (brand_id,))
+        return cur.fetchall()
+
+
+def get_current_claims_for_product(conn: psycopg.Connection, product_id: str) -> list[dict]:
+    """Current claims joined with their spec_attributes row (key/data_type/
+    name) -- page_visibility.py needs data_type to decide HOW to check for
+    a claim's value as literal text (numeric vs. text/enum vs. skip for
+    boolean)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select c.*, sa.key as spec_key, sa.data_type as spec_data_type, sa.name_en as spec_name_en
+              from claims c
+              join spec_attributes sa on sa.id = c.spec_attribute_id
+             where c.product_id = %s and c.is_current
+            """,
+            (product_id,),
+        )
+        return cur.fetchall()
+
+
 def insert_answer_claim(conn: psycopg.Connection, row: dict) -> str:
     with conn.cursor() as cur:
         cur.execute(
@@ -501,6 +535,62 @@ def insert_answer_claim(conn: psycopg.Connection, row: dict) -> str:
                     %(resolution_score)s, %(spec_attribute_id)s, %(value_numeric)s, %(value_numeric_max)s,
                     %(value_text)s, %(value_bool)s, %(value_enum)s, %(unit)s, %(source_quote)s, %(verdict)s,
                     %(compared_claim_id)s, %(confusable_key)s)
+            returning id
+            """,
+            row,
+        )
+        return cur.fetchone()["id"]
+
+
+# ---------------------------------------------------------------------
+# Crawlability (Part 5a)
+# ---------------------------------------------------------------------
+
+def insert_crawlability_check(
+    conn: psycopg.Connection, *, brand_id: str, website_url: str, robots_txt_url: str,
+    http_status: Optional[int], robots_txt_body: Optional[str], error: Optional[str],
+) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into crawlability_checks (brand_id, website_url, robots_txt_url, http_status, robots_txt_body, error)
+            values (%s, %s, %s, %s, %s, %s)
+            returning id
+            """,
+            (brand_id, website_url, robots_txt_url, http_status, robots_txt_body, error),
+        )
+        return cur.fetchone()["id"]
+
+
+def insert_crawlability_agent(
+    conn: psycopg.Connection, *, check_id: str, agent_name: str, allowed: Optional[bool],
+    matched_rule: Optional[str], matched_group: Optional[str],
+) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into crawlability_agents (check_id, agent_name, allowed, matched_rule, matched_group)
+            values (%s, %s, %s, %s, %s)
+            returning id
+            """,
+            (check_id, agent_name, allowed, matched_rule, matched_group),
+        )
+        return cur.fetchone()["id"]
+
+
+# ---------------------------------------------------------------------
+# Page-spec-visibility (Part 5b)
+# ---------------------------------------------------------------------
+
+def insert_page_spec_visibility(conn: psycopg.Connection, row: dict) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into page_spec_visibility
+              (product_id, claim_id, product_url, http_status, value_found_as_text,
+               schema_org_product_present, error)
+            values (%(product_id)s, %(claim_id)s, %(product_url)s, %(http_status)s, %(value_found_as_text)s,
+                    %(schema_org_product_present)s, %(error)s)
             returning id
             """,
             row,

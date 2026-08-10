@@ -76,8 +76,9 @@ import sys
 
 from anthropic import Anthropic
 
-from . import benchmark, claims_diff, db, pipeline, report, storage, visibility
+from . import benchmark, claims_diff, crawlability, db, page_visibility, pipeline, report, storage, visibility
 from .config import load_config
+from .http_fetch import make_httpx_fetcher
 from .persistence import slugify
 
 _DOCUMENT_KINDS = ["datasheet", "dop", "epd", "certificate", "test_report",
@@ -113,9 +114,97 @@ def cmd_create_product(args: argparse.Namespace) -> int:
         name=args.name, slug=slugify(args.name, args.manufacturer_ref),
         manufacturer_ref=args.manufacturer_ref,
     )
+    if args.product_url:
+        db.set_product_url(conn, product_id, args.product_url)
     conn.commit()
     conn.close()
     print(f"created product {product_id} ({args.name})")
+    return 0
+
+
+def cmd_update_product(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    product = db.get_product_by_slug(conn, args.product_slug)
+    if product is None:
+        print(f"no product with slug '{args.product_slug}'")
+        return 1
+
+    db.set_product_url(conn, product["id"], args.product_url)
+    conn.commit()
+    conn.close()
+    print(f"product {product['id']} ({product['name']}): product_url set to {args.product_url}")
+    return 0
+
+
+def cmd_update_brand(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand_slug)
+    if brand is None:
+        print(f"no brand with slug '{args.brand_slug}'")
+        return 1
+
+    db.set_brand_website(conn, brand["id"], args.website)
+    conn.commit()
+    conn.close()
+    print(f"brand {brand['id']} ({brand['name']}): website set to {args.website}")
+    return 0
+
+
+def cmd_crawlability(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand)
+    if brand is None:
+        print(f"no brand with slug '{args.brand}'")
+        return 1
+    if not brand.get("website"):
+        print(f"brand '{args.brand}' has no website set -- set one first: "
+              f"python -m ingest.cli update-brand --brand-slug {args.brand} --website https://...")
+        return 1
+
+    check_id, stats = crawlability.run_crawlability_check(
+        conn, brand_id=brand["id"], website_url=brand["website"], fetcher=make_httpx_fetcher(),
+    )
+    conn.commit()
+    conn.close()
+
+    print(f"crawlability check {check_id} for {brand['name']} ({brand['website']}):")
+    if stats.fetch_error:
+        print(f"  robots.txt fetch problem: {stats.fetch_error} -- all agents recorded as undetermined")
+    print(f"  allowed ({len(stats.allowed)}): {', '.join(stats.allowed) or '-'}")
+    print(f"  blocked ({len(stats.blocked)}): {', '.join(stats.blocked) or '-'}")
+    if stats.undetermined:
+        print(f"  undetermined ({len(stats.undetermined)}): {', '.join(stats.undetermined)}")
+    return 0
+
+
+def cmd_page_visibility(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand)
+    if brand is None:
+        print(f"no brand with slug '{args.brand}'")
+        return 1
+
+    stats = page_visibility.run_page_visibility_check(conn, brand_id=brand["id"], fetcher=make_httpx_fetcher())
+    conn.commit()
+    conn.close()
+
+    print(f"page-visibility check for {brand['name']}:")
+    print(f"  products checked: {stats.products_checked} "
+          f"(skipped: {stats.products_skipped_no_url} no product_url, "
+          f"{stats.products_skipped_no_ground_truth} no ground truth)")
+    print(f"  claims checked: {stats.claims_checked} "
+          f"(found: {stats.claims_found}, not found: {stats.claims_not_found}, "
+          f"undetermined: {stats.claims_undetermined})")
+    for line in stats.fetch_errors:
+        print(f"  fetch error: {line}")
     return 0
 
 
@@ -546,7 +635,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_product.add_argument("--category-code", default=None)
     p_product.add_argument("--name", required=True)
     p_product.add_argument("--manufacturer-ref", default=None)
+    p_product.add_argument("--product-url", default=None,
+                            help="public product page URL -- needed later for `page-visibility` (Part 5)")
     p_product.set_defaults(func=cmd_create_product)
+
+    p_update_product = sub.add_parser("update-product", help="set/update an existing product's public URL")
+    p_update_product.add_argument("--product-slug", required=True)
+    p_update_product.add_argument("--product-url", required=True)
+    p_update_product.set_defaults(func=cmd_update_product)
+
+    p_update_brand = sub.add_parser("update-brand", help="set/update an existing brand's website")
+    p_update_brand.add_argument("--brand-slug", required=True)
+    p_update_brand.add_argument("--website", required=True)
+    p_update_brand.set_defaults(func=cmd_update_brand)
 
     p_upload = sub.add_parser("upload", help="upload a document version and run extraction")
     p_upload.add_argument("file", help="path to a PDF on disk")
@@ -604,6 +705,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_claims_extract = claims_sub.add_parser("extract", help="extract and diff claims for one visibility_runs id")
     p_claims_extract.add_argument("--run", required=True, dest="run_id")
     p_claims_extract.set_defaults(func=cmd_claims_extract)
+
+    p_crawlability = sub.add_parser(
+        "crawlability", help="MVP brief Part 5a: check robots.txt precedence for every test AI-crawler agent",
+    )
+    p_crawlability.add_argument("--brand", required=True, help="brand slug -- uses brands.website")
+    p_crawlability.set_defaults(func=cmd_crawlability)
+
+    p_page_visibility = sub.add_parser(
+        "page-visibility",
+        help="MVP brief Part 5b: for each product with ground truth, check whether its verified spec "
+             "values appear as literal text on its public product page",
+    )
+    p_page_visibility.add_argument("--brand", required=True, help="brand slug")
+    p_page_visibility.set_defaults(func=cmd_page_visibility)
 
     p_review = sub.add_parser("review", help="triage found-but-undefined specs")
     review_sub = p_review.add_subparsers(dest="review_command", required=True)
