@@ -35,6 +35,23 @@ class Config:
     gemini_model: str
     worker_name: str
 
+    # Part 3's benchmark engine (visibility.py) gets its OWN model config,
+    # deliberately separate from anthropic_model/openai_chat_model/
+    # gemini_model above (decided with stijn 2026-08-10). Those exist for
+    # extraction (Claude) and the old benchmark.py (ChatGPT/Gemini plain
+    # chat completions); Part 3 is standing in for what a real end user
+    # sees in each provider's actual chat product, tools/web-search wired
+    # in, which is a different job that may reasonably want a different
+    # model than extraction picks for cost/quality reasons -- pinning them
+    # together would make that an accidental coupling, not a decision.
+    visibility_anthropic_model: str
+    visibility_openai_model: str
+    visibility_gemini_model: str
+    # Hard-abort knobs read once per `benchmark` run, not per-call — see
+    # visibility.py's run_visibility().
+    visibility_max_answers_per_run: int
+    visibility_cost_ceiling_usd: float
+
     embedding_dimensions: int = EMBEDDING_DIMENSIONS
 
 
@@ -51,6 +68,11 @@ def load_config() -> Config:
         google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
         gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
         worker_name=os.environ.get("WORKER_NAME", "visibility-ingest-worker"),
+        visibility_anthropic_model=os.environ.get("VISIBILITY_ANTHROPIC_MODEL", "claude-sonnet-5"),
+        visibility_openai_model=os.environ.get("VISIBILITY_OPENAI_MODEL", "gpt-4o"),
+        visibility_gemini_model=os.environ.get("VISIBILITY_GEMINI_MODEL", "gemini-2.0-flash"),
+        visibility_max_answers_per_run=int(os.environ.get("VISIBILITY_MAX_ANSWERS_PER_RUN", "500")),
+        visibility_cost_ceiling_usd=float(os.environ.get("VISIBILITY_COST_CEILING_USD", "50")),
     )
 
 

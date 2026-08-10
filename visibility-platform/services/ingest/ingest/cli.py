@@ -41,6 +41,24 @@ Usage:
     #                               "retrieved_at": "2026-08-09",
     #                               "kind": "datasheet"}}
     python -m ingest.cli ingest --brand hunter-douglas --dir .\\docs\\hd\\
+
+    # MVP brief Part 3 -- visibility.py's engine, reads from `prompts`
+    # (Part 2), not prompt_library, and runs all three real consumer-facing
+    # AI products WITH their real web-search/grounding tool on, unlike
+    # run-benchmark's plain chat completions above. --engine is repeatable
+    # to restrict to a subset; omit it to run all three. Always dry-run
+    # first -- it prints the planned answer count and a rough cost estimate
+    # without making any calls.
+    python -m ingest.cli benchmark --brand hunter-douglas --category systeemplafond --dry-run
+    python -m ingest.cli benchmark --brand hunter-douglas --category systeemplafond
+
+    # A run that hit VISIBILITY_MAX_ANSWERS_PER_RUN or
+    # VISIBILITY_COST_CEILING_USD stops without failing (status stays
+    # 'running') -- continue it with the run_id printed at stop time.
+    # --resume-run only ever targets one engine (a run is engine-locked),
+    # so --engine here must resolve to exactly one.
+    python -m ingest.cli benchmark --brand hunter-douglas --category systeemplafond \\
+        --engine openai --resume-run <run-id-from-earlier-output>
 """
 from __future__ import annotations
 
@@ -50,7 +68,7 @@ import json
 import pathlib
 import sys
 
-from . import benchmark, db, pipeline, report, storage
+from . import benchmark, db, pipeline, report, storage, visibility
 from .config import load_config
 from .persistence import slugify
 
@@ -335,6 +353,89 @@ def cmd_run_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _make_visibility_caller(engine: str, config) -> tuple[visibility.VisibilityCaller, str]:
+    """Returns (caller, requested_model) for `engine`, or raises RuntimeError
+    if that engine's API key isn't configured."""
+    if engine == "openai":
+        if not config.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        return visibility.make_openai_caller(config.openai_api_key, config.visibility_openai_model), \
+            config.visibility_openai_model
+    if engine == "anthropic":
+        if not config.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        return visibility.make_anthropic_caller(config.anthropic_api_key, config.visibility_anthropic_model), \
+            config.visibility_anthropic_model
+    if engine == "gemini":
+        if not config.google_api_key:
+            raise RuntimeError("GOOGLE_API_KEY is not set")
+        return visibility.make_gemini_caller(config.google_api_key, config.visibility_gemini_model), \
+            config.visibility_gemini_model
+    raise ValueError(f"unknown engine {engine!r}")
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand)
+    if brand is None:
+        print(f"no brand with slug '{args.brand}'")
+        return 1
+
+    category = db.get_category_by_code(conn, args.category)
+    if category is None:
+        print(f"no category with code '{args.category}'")
+        return 1
+
+    engines = args.engine or ["openai", "anthropic", "gemini"]
+
+    if args.resume_run and len(engines) != 1:
+        print("--resume-run requires exactly one --engine (a run is locked to a single engine)")
+        return 1
+
+    if args.dry_run:
+        total_cost = 0.0
+        for engine in engines:
+            plan = visibility.plan_run(
+                conn, category_id=category["id"], engine=engine, replicates=args.replicates,
+                resume_run_id=args.resume_run,
+            )
+            total_cost += plan.estimated_cost_usd
+            print(f"{engine}: {plan.prompt_count} active prompts x {plan.replicates} replicates "
+                  f"- {plan.already_answered} already answered = {plan.planned_answers} planned answers, "
+                  f"~${plan.estimated_cost_usd:.2f} (rough estimate)")
+        print(f"total estimated cost across {len(engines)} engine(s): ~${total_cost:.2f} -- "
+              f"nothing was called, this is a projection only")
+        conn.close()
+        return 0
+
+    exit_code = 0
+    for engine in engines:
+        try:
+            caller, requested_model = _make_visibility_caller(engine, config)
+        except RuntimeError as exc:
+            print(f"skipping {engine}: {exc}")
+            exit_code = 1
+            continue
+
+        print(f"running {engine} ({requested_model}) x{args.replicates} replicates for {brand['name']}...")
+        run_id, stats = visibility.run_visibility(
+            conn, organization_id=brand["organization_id"], brand_id=brand["id"],
+            category_id=category["id"], engine=engine, requested_model=requested_model,
+            caller=caller, replicates=args.replicates,
+            max_answers_per_run=config.visibility_max_answers_per_run,
+            cost_ceiling_usd=config.visibility_cost_ceiling_usd,
+            resume_run_id=args.resume_run if len(engines) == 1 else None,
+        )
+        conn.commit()
+        print(f"  run {run_id}: {stats.answers_succeeded} succeeded, {stats.answers_failed} failed "
+              f"this invocation, ~${stats.cost_usd_this_invocation:.2f} spent this invocation")
+
+    conn.close()
+    return exit_code
+
+
 def cmd_review_list(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.database_url)
@@ -435,6 +536,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_benchmark.add_argument("--brand-slug", required=True)
     p_benchmark.add_argument("--model", required=True, choices=["chatgpt", "gemini"])
     p_benchmark.set_defaults(func=cmd_run_benchmark)
+
+    p_benchmark_v2 = sub.add_parser(
+        "benchmark",
+        help="MVP brief Part 3: run `prompts` through OpenAI/Anthropic/Gemini with real web search/grounding",
+    )
+    p_benchmark_v2.add_argument("--brand", required=True, help="brand slug")
+    p_benchmark_v2.add_argument("--category", required=True, help="product_categories.code")
+    p_benchmark_v2.add_argument(
+        "--engine", action="append", choices=["openai", "anthropic", "gemini"],
+        help="repeatable, e.g. --engine openai --engine gemini; omit to run all three",
+    )
+    p_benchmark_v2.add_argument("--replicates", type=int, default=3)
+    p_benchmark_v2.add_argument(
+        "--dry-run", action="store_true", help="print planned answer count/cost, execute nothing"
+    )
+    p_benchmark_v2.add_argument(
+        "--resume-run", default=None,
+        help="continue an existing run_id (requires exactly one --engine, a run is engine-locked)",
+    )
+    p_benchmark_v2.set_defaults(func=cmd_benchmark)
 
     p_review = sub.add_parser("review", help="triage found-but-undefined specs")
     review_sub = p_review.add_subparsers(dest="review_command", required=True)
