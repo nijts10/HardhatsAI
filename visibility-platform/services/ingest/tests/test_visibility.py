@@ -254,3 +254,107 @@ def test_run_visibility_rejects_resume_with_mismatched_engine(conn):
         assert False, "expected ValueError for engine mismatch"
     except ValueError:
         pass
+
+
+# ---------------------------------------------------------------------
+# commit_each_answer -- both tests below deliberately commit REAL data
+# (that's the whole point: proving durability across a rollback/crash),
+# which the standard rollback-based test fixture (tests/conftest.py)
+# can't clean up on its own. Each does its own explicit teardown so
+# repeated test runs don't collide on the org/brand slug.
+# ---------------------------------------------------------------------
+
+def test_commit_each_answer_true_persists_answers_durably(conn):
+    org_id, brand_id = _make_org_brand(conn, slug="durable")
+    category_id = _systeemplafond_category(conn)
+
+    try:
+        run_id, stats = run_visibility(
+            conn, organization_id=org_id, brand_id=brand_id, category_id=category_id,
+            engine="openai", requested_model="gpt-4o", caller=_canned_caller(),
+            replicates=1, max_answers_per_run=1000, cost_ceiling_usd=1000,
+            commit_each_answer=True,
+        )
+        assert stats.answers_succeeded > 0
+
+        # A rollback here must NOT remove anything -- if it did, the rows
+        # were only ever pending in an open transaction, not truly
+        # durable, which is exactly the bug this flag closes.
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("select count(*) as n from visibility_answers where run_id = %s", (run_id,))
+            assert cur.fetchone()["n"] == stats.answers_succeeded
+            cur.execute("select status from visibility_runs where id = %s", (run_id,))
+            assert cur.fetchone()["status"] == "succeeded"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("delete from visibility_answers where run_id in "
+                        "(select id from visibility_runs where brand_id = %s)", (brand_id,))
+            cur.execute("delete from visibility_runs where brand_id = %s", (brand_id,))
+            cur.execute("delete from brands where id = %s", (brand_id,))
+            cur.execute("delete from organizations where id = %s", (org_id,))
+        conn.commit()
+
+
+def test_db_level_failure_mid_run_rolls_back_cleanly_and_marks_run_failed(conn):
+    org_id, brand_id = _make_org_brand(conn, slug="dbfail")
+    category_id = _systeemplafond_category(conn)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id from prompts where category_id = %s and is_active order by intent, created_at limit 1",
+            (category_id,),
+        )
+        target_prompt_id = cur.fetchone()["id"]
+
+    def poison_caller(prompt_text):
+        # Force a genuine DB-level failure on the very next insert: delete
+        # the prompt row it's about to reference, violating visibility_
+        # answers.prompt_id's foreign key. Not a caller-level exception --
+        # those are already handled separately inside the loop; this
+        # exercises the OUTER except-Exception recovery path instead.
+        with conn.cursor() as cur:
+            cur.execute("delete from prompts where id = %s", (target_prompt_id,))
+        return AnswerResult(response_text="x", resolved_model_version="m", input_tokens=1, output_tokens=1)
+
+    run_id = None
+    try:
+        raised = None
+        try:
+            run_visibility(
+                conn, organization_id=org_id, brand_id=brand_id, category_id=category_id,
+                engine="openai", requested_model="gpt-4o", caller=poison_caller,
+                replicates=1, max_answers_per_run=1000, cost_ceiling_usd=1000,
+                commit_each_answer=True,
+            )
+        except Exception as exc:
+            raised = exc
+        assert raised is not None, "expected the foreign-key violation to propagate"
+        # Must be the REAL underlying error, not psycopg.errors.
+        # InFailedSqlTransaction from the recovery UPDATE choking on an
+        # already-aborted connection -- exactly the bug this fix closes.
+        assert type(raised).__name__ != "InFailedSqlTransaction"
+
+        with conn.cursor() as cur:
+            cur.execute("select id, status, error from visibility_runs where organization_id = %s", (org_id,))
+            row = cur.fetchone()
+        assert row is not None, "the run row must have survived (committed before the loop started)"
+        run_id = row["id"]
+        assert row["status"] == "failed"
+        assert row["error"] is not None
+
+        # The deleted prompt itself was never committed (the failed insert
+        # and the delete were in the same open transaction, both undone by
+        # the fix's rollback) -- the seed data is intact, not corrupted by
+        # this test.
+        with conn.cursor() as cur:
+            cur.execute("select 1 from prompts where id = %s", (target_prompt_id,))
+            assert cur.fetchone() is not None
+    finally:
+        with conn.cursor() as cur:
+            if run_id:
+                cur.execute("delete from visibility_answers where run_id = %s", (run_id,))
+                cur.execute("delete from visibility_runs where id = %s", (run_id,))
+            cur.execute("delete from brands where id = %s", (brand_id,))
+            cur.execute("delete from organizations where id = %s", (org_id,))
+        conn.commit()

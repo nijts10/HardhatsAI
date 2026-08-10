@@ -252,6 +252,7 @@ def run_visibility(
     engine: str, requested_model: str, caller: VisibilityCaller, replicates: int = 3,
     max_answers_per_run: int, cost_ceiling_usd: float,
     resume_run_id: Optional[str] = None, triggered_by: Optional[str] = None,
+    commit_each_answer: bool = False,
 ) -> tuple[str, VisibilityStats]:
     """Runs every active prompt in `category_id` through `caller`,
     `replicates` times each, skipping any (prompt_id, replicate_index)
@@ -266,6 +267,21 @@ def run_visibility(
     'running' (not 'succeeded') if any (prompt, replicate) pair is still
     missing at the end of the pass, ready for the next --resume-run to
     retry exactly the gaps.
+
+    commit_each_answer: when True, commits the connection right after the
+    run row itself is created/resumed, and again after each successfully-
+    persisted answer -- this is what 0016_visibility_runs.sql's own
+    comment on cost_usd promises ("updated as answers land ... so a crash
+    mid-run leaves an accurate number behind for the cost-ceiling check on
+    resume"). Without it nothing is durable until the CALLER commits,
+    typically only once after this function fully returns -- a crash mid-
+    run then loses every answer and every dollar of real spend back to
+    that last caller-issued commit, and --resume-run re-spends money the
+    ceiling was meant to protect against. Defaults to False so existing
+    callers/tests that manage their own transaction boundaries (in
+    particular this test suite's rollback-based isolation, see
+    tests/conftest.py) are unaffected -- cli.py's real `benchmark` command
+    passes True.
     """
     with conn.cursor() as cur:
         if resume_run_id:
@@ -307,6 +323,15 @@ def run_visibility(
             (run_id,),
         )
         already = {(row["prompt_id"], row["replicate_index"]) for row in cur.fetchall()}
+
+    if commit_each_answer:
+        # Make the run row itself durable before any answer processing
+        # starts -- otherwise, if the very first answer's insert fails
+        # before any per-answer commit below ever runs, the rollback in
+        # the exception handler would discard this INSERT too, and the
+        # recovery UPDATE that follows would silently affect zero rows
+        # (the run_id it's targeting would no longer exist).
+        conn.commit()
 
     stats = VisibilityStats()
     try:
@@ -360,6 +385,8 @@ def run_visibility(
                 cost_so_far += answer_cost
                 stats.cost_usd_this_invocation += answer_cost
                 stats.answers_succeeded += 1
+                if commit_each_answer:
+                    conn.commit()
 
     except (MaxAnswersReached, CostCeilingReached) as stop_reason:
         with conn.cursor() as cur:
@@ -367,13 +394,27 @@ def run_visibility(
                 "update visibility_runs set stats = stats || %s where id = %s",
                 (Jsonb({"last_stop_reason": str(stop_reason)}), run_id),
             )
+        if commit_each_answer:
+            conn.commit()
         return run_id, stats
     except Exception as exc:
+        # A DB-level failure (e.g. the insert above hitting a constraint)
+        # leaves the connection in an aborted-transaction state -- any
+        # further query, including the recovery UPDATE right below, would
+        # itself raise InFailedSqlTransaction and mask the real error
+        # without this rollback first. Safe even when the failure was NOT
+        # DB-related (a plain Python exception leaves no transaction to
+        # roll back, so this is a no-op in that case) and safe with
+        # commit_each_answer=True (prior answers are already committed --
+        # this only discards the current still-open, never-committed work).
+        conn.rollback()
         with conn.cursor() as cur:
             cur.execute(
                 "update visibility_runs set status = 'failed', error = %s, finished_at = now() where id = %s",
                 (str(exc), run_id),
             )
+        if commit_each_answer:
+            conn.commit()
         raise
 
     # The pass finished without hitting a ceiling -- but individual calls
@@ -399,5 +440,8 @@ def run_visibility(
                        "last_stop_reason": f"{expected_total - total_answers} answer(s) failed this pass "
                                            f"-- resume with --resume-run {run_id} to retry them"}), run_id),
             )
+
+    if commit_each_answer:
+        conn.commit()
 
     return run_id, stats

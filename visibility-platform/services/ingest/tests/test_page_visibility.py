@@ -256,3 +256,47 @@ def test_not_stated_claim_has_nothing_to_check_and_is_excluded(conn):
     # The ONLY claim for this product is not_stated -- nothing to check against,
     # so the product itself is skipped as having no (real) ground truth.
     assert stats.products_skipped_no_ground_truth == 1
+
+
+def test_zero_valued_spec_does_not_false_positive_on_unrelated_page_numbers(conn):
+    # A bare "0" would match almost any real page (prices, phone numbers,
+    # dates, unrelated specs) under a plain substring check -- a
+    # legitimately zero-valued spec (e.g. recycled_content_pct=0) must
+    # NOT be reported as "found" just because some OTHER number on the
+    # page happens to contain a "0" digit.
+    org_id, brand_id = _make_org_brand(conn, slug="pv-zero-fp")
+    category_id = _systeemplafond_category(conn)
+    product_id = _make_product(conn, brand_id, category_id, "Acme Zero Panel",
+                                product_url="https://acme.example/zero")
+    doc_version_id = _make_document_version(conn, org_id, product_id)
+    spec_id = _make_spec_attribute(conn, key="alpha_pv_zero_fp")
+    _make_claim(conn, product_id=product_id, spec_attribute_id=spec_id, document_version_id=doc_version_id,
+                value_numeric=0)
+
+    # Contains plenty of "0" digits (prijs, 100, 2026) but never a
+    # standalone "0" -- must NOT be reported as found.
+    html = "<html><body><p>Prijs: 100 euro. Model 2026-40. Voorraad: 10 stuks.</p></body></html>"
+    stats = run_page_visibility_check(
+        conn, brand_id=brand_id,
+        fetcher=_canned_fetcher({"https://acme.example/zero": FetchResult(200, html, None)}),
+    )
+    assert stats.claims_found == 0
+    assert stats.claims_not_found == 1
+
+
+def test_zero_valued_spec_is_found_when_present_as_a_standalone_token(conn):
+    org_id, brand_id = _make_org_brand(conn, slug="pv-zero-tp")
+    category_id = _systeemplafond_category(conn)
+    product_id = _make_product(conn, brand_id, category_id, "Acme Zero True Panel",
+                                product_url="https://acme.example/zero-true")
+    doc_version_id = _make_document_version(conn, org_id, product_id)
+    spec_id = _make_spec_attribute(conn, key="alpha_pv_zero_tp")
+    _make_claim(conn, product_id=product_id, spec_attribute_id=spec_id, document_version_id=doc_version_id,
+                value_numeric=0)
+
+    html = "<html><body><p>Gerecycled materiaal: 0 procent.</p></body></html>"
+    stats = run_page_visibility_check(
+        conn, brand_id=brand_id,
+        fetcher=_canned_fetcher({"https://acme.example/zero-true": FetchResult(200, html, None)}),
+    )
+    assert stats.claims_found == 1

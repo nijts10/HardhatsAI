@@ -38,7 +38,7 @@ from bs4 import BeautifulSoup
 
 from . import db
 from .http_fetch import Fetcher
-from .verification import snippet_in_page
+from .verification import normalize_text, snippet_in_page
 
 _SCHEMA_ORG_ITEMTYPE_RE = re.compile(r"schema\.org/Product\b", re.I)
 
@@ -73,6 +73,23 @@ def _numeric_text_candidates(value: float) -> list[str]:
     return list({base, base.replace(".", ",")})
 
 
+def _numeric_candidate_found(candidate: str, visible_text: str) -> bool:
+    """Word-boundary match, NOT verification.snippet_in_page's plain
+    substring check -- a numeric candidate can be as short as a single
+    digit (a legitimately zero-valued spec, e.g. recycled_content_pct=0),
+    and a bare substring test against an entire rendered page would match
+    almost anywhere a "0" appears (prices, phone numbers, dates, other
+    specs), reporting a false "found" for every such claim. \\b boundaries
+    on both ends fix this generally (not just for "0") since digits are
+    word characters -- "0" cannot match inside "100" (no boundary between
+    contiguous digits), only as a standalone token. Reuses verification.
+    normalize_text for the same whitespace/unicode/dash handling
+    snippet_in_page itself uses, just with a boundary-aware search instead
+    of `in`."""
+    pattern = re.compile(r"\b" + re.escape(normalize_text(candidate)) + r"\b")
+    return pattern.search(normalize_text(visible_text)) is not None
+
+
 def _value_found_in_text(claim: dict, visible_text: str) -> Optional[bool]:
     if claim["spec_data_type"] == "boolean":
         return None  # no reliable literal-text form for a boolean fact -- not checked, see module docstring
@@ -80,7 +97,7 @@ def _value_found_in_text(claim: dict, visible_text: str) -> Optional[bool]:
         if claim.get("value_numeric") is None:
             return None
         candidates = _numeric_text_candidates(float(claim["value_numeric"]))
-        return any(snippet_in_page(c, visible_text) for c in candidates)
+        return any(_numeric_candidate_found(c, visible_text) for c in candidates)
     value = claim.get("value_text") or claim.get("value_enum")
     if not value:
         return None

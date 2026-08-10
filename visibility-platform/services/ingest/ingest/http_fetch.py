@@ -37,7 +37,13 @@ def make_httpx_fetcher(timeout: float = 10.0) -> Fetcher:
         try:
             response = httpx.get(url, timeout=timeout, follow_redirects=True, headers={"User-Agent": USER_AGENT})
             return FetchResult(status_code=response.status_code, text=response.text, error=None)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # InvalidURL (e.g. a malformed brands.website/products.product_url --
+            # both are unconstrained free text) is NOT a subclass of HTTPError in
+            # httpx's own hierarchy, and is raised at URL-parse time before any
+            # request is sent -- without this, a bad stored URL crashes the whole
+            # crawlability/page-visibility check instead of recording a clean
+            # per-check fetch error.
             return FetchResult(status_code=None, text=None, error=str(exc))
 
     return _fetch

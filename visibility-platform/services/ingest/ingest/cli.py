@@ -73,6 +73,7 @@ import datetime
 import json
 import pathlib
 import sys
+from typing import Optional
 
 from anthropic import Anthropic
 
@@ -520,14 +521,24 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             continue
 
         print(f"running {engine} ({requested_model}) x{args.replicates} replicates for {brand['name']}...")
-        run_id, stats = visibility.run_visibility(
-            conn, organization_id=brand["organization_id"], brand_id=brand["id"],
-            category_id=category["id"], engine=engine, requested_model=requested_model,
-            caller=caller, replicates=args.replicates,
-            max_answers_per_run=config.visibility_max_answers_per_run,
-            cost_ceiling_usd=config.visibility_cost_ceiling_usd,
-            resume_run_id=args.resume_run if len(engines) == 1 else None,
-        )
+        try:
+            run_id, stats = visibility.run_visibility(
+                conn, organization_id=brand["organization_id"], brand_id=brand["id"],
+                category_id=category["id"], engine=engine, requested_model=requested_model,
+                caller=caller, replicates=args.replicates,
+                max_answers_per_run=config.visibility_max_answers_per_run,
+                cost_ceiling_usd=config.visibility_cost_ceiling_usd,
+                resume_run_id=args.resume_run if len(engines) == 1 else None,
+                commit_each_answer=True,
+            )
+        except Exception as exc:
+            # run_visibility already marked the run 'failed' and committed
+            # that itself (commit_each_answer=True) before re-raising --
+            # report and move on to the next engine instead of crashing the
+            # whole multi-engine loop over one engine's failure.
+            print(f"  {engine} run failed: {exc}")
+            exit_code = 1
+            continue
         conn.commit()
         print(f"  run {run_id}: {stats.answers_succeeded} succeeded, {stats.answers_failed} failed "
               f"this invocation, ~${stats.cost_usd_this_invocation:.2f} spent this invocation")
@@ -547,7 +558,9 @@ def cmd_claims_extract(args: argparse.Namespace) -> int:
     caller = claims_diff.make_anthropic_extractor(Anthropic(api_key=config.anthropic_api_key), config.anthropic_model)
 
     try:
-        stats = claims_diff.run_claims_extraction(conn, run_id=args.run_id, caller=caller)
+        stats = claims_diff.run_claims_extraction(
+            conn, run_id=args.run_id, caller=caller, commit_each_answer=True,
+        )
         conn.commit()
     except ValueError as exc:
         conn.rollback()
@@ -604,6 +617,23 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_brand_mismatch_error(run: Optional[dict], brand: dict, run_id: str, brand_slug: str) -> Optional[str]:
+    """Pure so it's testable without a live DB connection. Returns an
+    error message when `run_id` doesn't belong to `brand_slug`'s brand,
+    None when it's fine to proceed.
+
+    generate_pdf_report derives brand_name/scorecard entirely from the
+    run's OWN brand_id, never from --brand -- without this check,
+    `report --brand a --run <b's run>` would silently produce a PDF full
+    of brand b's data, saved under and reported as brand a's filename."""
+    if run is None:
+        return f"visibility_runs {run_id} not found"
+    if str(run["brand_id"]) != str(brand["id"]):
+        return (f"run {run_id} belongs to a different brand (brand_id {run['brand_id']}) "
+                f"than '{brand_slug}' (brand_id {brand['id']}) -- refusing to generate a mislabelled report")
+    return None
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     if args.format != "pdf":
         print(f"--format {args.format!r} not supported yet -- only 'pdf'")
@@ -615,6 +645,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     brand = db.get_brand_by_slug(conn, args.brand)
     if brand is None:
         print(f"no brand with slug '{args.brand}'")
+        conn.close()
+        return 1
+
+    run = db.get_visibility_run(conn, args.run_id)
+    mismatch = _run_brand_mismatch_error(run, brand, args.run_id, args.brand)
+    if mismatch:
+        print(mismatch)
         conn.close()
         return 1
 

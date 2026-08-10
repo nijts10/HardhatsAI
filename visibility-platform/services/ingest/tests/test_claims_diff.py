@@ -3,9 +3,10 @@ deliberate hallucinated-quote fixture, unit normalisation, and tolerance
 comparison including the confusion cases -- run against the real schema,
 not mocks."""
 import hashlib
+import json
 import uuid
 
-from ingest.claims_diff import run_claims_extraction
+from ingest.claims_diff import make_anthropic_extractor, run_claims_extraction
 
 
 def _make_org_brand(conn, slug="acme"):
@@ -347,3 +348,118 @@ def test_unknown_run_id_raises_value_error(conn):
         assert False, "expected ValueError for unknown run_id"
     except ValueError:
         pass
+
+
+def test_value_type_mismatch_is_rejected_not_a_constraint_violation(conn):
+    # The tool call tags a NUMERIC spec but only fills value_text --
+    # answer_claims_value_ck requires exactly one value_* column, so
+    # without the dispatch-by-data_type fix this would either insert an
+    # all-null row (constraint violation) or a wrongly-typed value_text
+    # row past validation entirely.
+    org_id, brand_id = _make_org_brand(conn, slug="mismatch-type")
+    category_id = _systeemplafond_category(conn)
+    _make_spec_attribute(conn, key="spec_mismatch_numeric", data_type="numeric")
+    run_id = _make_run(conn, organization_id=org_id, brand_id=brand_id, category_id=category_id)
+
+    response_text = "Acme Mismatch Panel has spec_mismatch_numeric of forty."
+    _make_answer(conn, run_id=run_id, category_id=category_id, response_text=response_text)
+
+    claim = [{
+        "brand_name": "Acme", "product_name": "Acme Mismatch Panel", "spec_key": "spec_mismatch_numeric",
+        "value_text": "forty", "source_quote": "spec_mismatch_numeric of forty",
+    }]
+    stats = run_claims_extraction(conn, run_id=run_id, caller=_canned_extractor(claim))
+
+    assert stats.claims_extracted == 0
+    assert stats.claims_rejected_value_type_mismatch == 1
+
+
+def test_extra_stray_value_field_is_discarded_not_inserted(conn):
+    # The opposite mismatch case: BOTH value_numeric (correct for this
+    # spec's data_type) AND a stray value_text are set on the same claim.
+    # The stray field must be silently dropped, not cause a constraint
+    # violation or get persisted alongside the real value.
+    org_id, brand_id = _make_org_brand(conn, slug="mismatch-extra")
+    category_id = _systeemplafond_category(conn)
+    _make_spec_attribute(conn, key="spec_extra_field", data_type="numeric", unit="mm")
+    run_id = _make_run(conn, organization_id=org_id, brand_id=brand_id, category_id=category_id)
+
+    response_text = "Acme Extra Panel has spec_extra_field of 40 mm."
+    answer_id = _make_answer(conn, run_id=run_id, category_id=category_id, response_text=response_text)
+
+    claim = [{
+        "brand_name": "Acme", "product_name": "Acme Extra Panel", "spec_key": "spec_extra_field",
+        "value_numeric": 40, "unit": "mm", "value_text": "forty millimeters -- should be dropped",
+        "source_quote": "spec_extra_field of 40 mm",
+    }]
+    stats = run_claims_extraction(conn, run_id=run_id, caller=_canned_extractor(claim))
+
+    assert stats.claims_extracted == 1
+    with conn.cursor() as cur:
+        cur.execute("select value_numeric, value_text from answer_claims where answer_id = %s", (answer_id,))
+        row = cur.fetchone()
+    assert float(row["value_numeric"]) == 40.0
+    assert row["value_text"] is None
+
+
+def test_anthropic_extractor_unwraps_double_encoded_claims_string():
+    # Same failure mode extraction.py's coerce_array guards against: the
+    # model sometimes returns the "claims" field as a JSON-encoded string
+    # instead of a structured array. Without reusing coerce_array here,
+    # this would iterate as characters and raise a TypeError.
+    fake_claims = [{
+        "brand_name": "Acme", "product_name": "Acme Panel", "spec_key": "spec_x",
+        "value_numeric": 5, "source_quote": "spec_x of 5",
+    }]
+
+    class _ToolUseBlock:
+        type = "tool_use"
+        name = "emit_answer_claims"
+        input = {"claims": json.dumps({"claims": fake_claims})}
+
+    class _Message:
+        content = [_ToolUseBlock()]
+
+    class _MessagesAPI:
+        def create(self, **kwargs):
+            return _Message()
+
+    class _Client:
+        messages = _MessagesAPI()
+
+    caller = make_anthropic_extractor(_Client(), model="claude-sonnet-5")
+    raw = caller("irrelevant prompt text")
+
+    assert raw == fake_claims
+
+
+def test_commit_each_answer_true_persists_claims_durably(conn):
+    org_id, brand_id = _make_org_brand(conn, slug="claims-durable")
+    category_id = _systeemplafond_category(conn)
+    _make_spec_attribute(conn, key="spec_durable")
+    run_id = _make_run(conn, organization_id=org_id, brand_id=brand_id, category_id=category_id)
+
+    response_text = "Acme Durable Panel has spec_durable of 5."
+    answer_id = _make_answer(conn, run_id=run_id, category_id=category_id, response_text=response_text)
+    claim = [{"brand_name": "Acme", "product_name": "Acme Durable Panel", "spec_key": "spec_durable",
+              "value_numeric": 5, "source_quote": "spec_durable of 5"}]
+
+    try:
+        stats = run_claims_extraction(
+            conn, run_id=run_id, caller=_canned_extractor(claim), commit_each_answer=True,
+        )
+        assert stats.claims_extracted == 1
+
+        # A rollback here must NOT remove anything already committed.
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("select count(*) as n from answer_claims where answer_id = %s", (answer_id,))
+            assert cur.fetchone()["n"] == 1
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("delete from answer_claims where answer_id = %s", (answer_id,))
+            cur.execute("delete from visibility_answers where run_id = %s", (run_id,))
+            cur.execute("delete from visibility_runs where id = %s", (run_id,))
+            cur.execute("delete from brands where id = %s", (brand_id,))
+            cur.execute("delete from organizations where id = %s", (org_id,))
+        conn.commit()

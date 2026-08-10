@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urlsplit
 
 from . import db
 from .http_fetch import Fetcher
@@ -45,14 +45,19 @@ class CrawlabilityStats:
     fetch_error: Optional[str] = None
 
 
-def run_crawlability_check(conn, *, brand_id: str, website_url: str, fetcher: Fetcher) -> tuple[str, CrawlabilityStats]:
-    robots_txt_url = urljoin(website_url.rstrip("/") + "/", "robots.txt")
-    result = fetcher(robots_txt_url)
+def _robots_txt_url(website_url: str) -> str:
+    """robots.txt always lives at the site ROOT, never relative to
+    whatever path happens to be stored in brands.website (an unconstrained
+    free-text column, e.g. set to 'https://example.com/products' by
+    mistake) -- resolving against that path instead of the origin would
+    fetch the wrong URL entirely and silently produce a wrong verdict."""
+    parts = urlsplit(website_url)
+    return f"{parts.scheme}://{parts.netloc}/robots.txt"
 
-    check_id = db.insert_crawlability_check(
-        conn, brand_id=brand_id, website_url=website_url, robots_txt_url=robots_txt_url,
-        http_status=result.status_code, robots_txt_body=result.text, error=result.error,
-    )
+
+def run_crawlability_check(conn, *, brand_id: str, website_url: str, fetcher: Fetcher) -> tuple[str, CrawlabilityStats]:
+    robots_txt_url = _robots_txt_url(website_url)
+    result = fetcher(robots_txt_url)
 
     stats = CrawlabilityStats()
 
@@ -66,6 +71,16 @@ def run_crawlability_check(conn, *, brand_id: str, website_url: str, fetcher: Fe
     else:
         stats.fetch_error = f"unexpected robots.txt status {result.status_code}"
         robots_text = None
+
+    # Persist whichever error (if any) was actually determined above --
+    # previously only a network-level result.error made it into the row,
+    # so an unexpected-status case (e.g. 500) left crawlability_checks.error
+    # NULL even though every agent below is recorded as undetermined,
+    # silently dropping the reason a report/CLI reader would need.
+    check_id = db.insert_crawlability_check(
+        conn, brand_id=brand_id, website_url=website_url, robots_txt_url=robots_txt_url,
+        http_status=result.status_code, robots_txt_body=result.text, error=stats.fetch_error,
+    )
 
     for agent in TEST_AGENTS:
         if robots_text is None:

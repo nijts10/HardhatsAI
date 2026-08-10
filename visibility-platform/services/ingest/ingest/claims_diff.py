@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import db
-from .extraction import spec_attributes_for_category
+from .extraction import coerce_array, spec_attributes_for_category
 from .verification import convert_unit, normalize_text, snippet_in_page, value_digits_in_snippet
 
 RESOLUTION_THRESHOLD = 0.45
@@ -157,7 +157,12 @@ def make_anthropic_extractor(client, model: str) -> AnswerClaimCaller:
         )
         for block in message.content:
             if block.type == "tool_use" and block.name == _TOOL_NAME:
-                return block.input.get("claims", [])
+                # Same double-encoding failure mode extraction.py's
+                # coerce_array guards against (Claude occasionally returns
+                # an array field as a JSON string instead of structured
+                # content) -- without this, that case iterates as
+                # characters below and kills the whole extraction pass.
+                return coerce_array(block.input.get("claims", []), wrapper_key="claims")
         return []
 
     return _call
@@ -242,22 +247,56 @@ def diff_claim(
     return DiffResult("incorrect", ground_truth["id"], None)
 
 
-def _row_values(claim: ExtractedAnswerClaim, spec_attribute: dict) -> dict:
+def _row_values(claim: ExtractedAnswerClaim, spec_attribute: dict) -> Optional[dict]:
     """The value/unit columns to persist, normalised to spec_attribute's
     canonical unit -- so answer_claims stores comparable values the same
-    way claims does, not whatever unit the AI happened to phrase it in."""
-    value_numeric, value_numeric_max, unit = claim.value_numeric, claim.value_numeric_max, spec_attribute.get("unit")
-    if value_numeric is not None:
-        value_numeric, unit = convert_unit(value_numeric, claim.unit, unit)
-        if value_numeric_max is not None:
-            value_numeric_max, _ = convert_unit(value_numeric_max, claim.unit, unit)
-    else:
-        unit = claim.unit
-    return {
-        "value_numeric": value_numeric, "value_numeric_max": value_numeric_max,
-        "value_text": claim.value_text, "value_bool": claim.value_bool, "value_enum": claim.value_enum,
-        "unit": unit,
-    }
+    way claims does, not whatever unit the AI happened to phrase it in.
+
+    Dispatches strictly on spec_attribute.data_type and nulls out every
+    OTHER value_* field, rather than passing all of the extracted claim's
+    fields straight through -- answer_claims_value_ck requires exactly one
+    of value_numeric/value_text/value_bool/value_enum to be non-null, but
+    _ANSWER_CLAIM_SCHEMA declares them as independent optional properties
+    (no cross-provider way to express "exactly one of" in the tool
+    schema). Without this, a tool call that populates more than one field
+    -- e.g. value_numeric plus a stray value_text restating the unit --
+    would reach db.insert_answer_claim and trip the check constraint,
+    aborting the entire extraction run over one imprecise LLM response
+    instead of just that one claim.
+
+    Returns None -- meaning "reject this claim, don't insert it" -- when
+    the field matching spec_attribute.data_type wasn't actually populated
+    (e.g. the tool call tagged a numeric spec but only filled value_text).
+    Nulling every OTHER field in that case would still leave all four
+    null, which trips the same check constraint from the opposite
+    direction; a value/type mismatch is exactly as unusable as no value
+    at all, so it's rejected the same way."""
+    data_type = spec_attribute["data_type"]
+    unit = spec_attribute.get("unit")
+
+    if data_type in ("numeric", "numeric_range"):
+        if claim.value_numeric is None:
+            return None
+        value_numeric, unit = convert_unit(claim.value_numeric, claim.unit, unit)
+        value_numeric_max = None
+        if claim.value_numeric_max is not None:
+            value_numeric_max, _ = convert_unit(claim.value_numeric_max, claim.unit, unit)
+        return {"value_numeric": value_numeric, "value_numeric_max": value_numeric_max,
+                "value_text": None, "value_bool": None, "value_enum": None, "unit": unit}
+    if data_type == "boolean":
+        if claim.value_bool is None:
+            return None
+        return {"value_numeric": None, "value_numeric_max": None, "value_text": None,
+                "value_bool": claim.value_bool, "value_enum": None, "unit": unit}
+    if data_type == "enum":
+        if not claim.value_enum:
+            return None
+        return {"value_numeric": None, "value_numeric_max": None, "value_text": None,
+                "value_bool": None, "value_enum": claim.value_enum, "unit": unit}
+    if not claim.value_text:
+        return None
+    return {"value_numeric": None, "value_numeric_max": None, "value_text": claim.value_text,
+            "value_bool": None, "value_enum": None, "unit": unit}
 
 
 @dataclass
@@ -267,10 +306,24 @@ class ClaimsExtractionStats:
     claims_extracted: int = 0
     claims_rejected_unverifiable_quote: int = 0
     claims_rejected_unknown_spec: int = 0
+    claims_rejected_value_type_mismatch: int = 0
     verdict_counts: dict = field(default_factory=dict)
 
 
-def run_claims_extraction(conn, *, run_id: str, caller: AnswerClaimCaller) -> ClaimsExtractionStats:
+def run_claims_extraction(
+    conn, *, run_id: str, caller: AnswerClaimCaller, commit_each_answer: bool = False,
+) -> ClaimsExtractionStats:
+    """commit_each_answer: when True, commits after each answer's claims
+    are fully inserted, so has_answer_claims()-based resumability is
+    durable across a process crash, not just within one open connection --
+    without it, NOTHING is committed until the caller commits after the
+    whole run finishes (cli.py previously did exactly that), so a failure
+    partway through discarded every already-extracted answer's claims,
+    forcing a full re-send to the LLM on retry. Defaults to False so
+    existing callers/tests that manage their own transaction boundaries
+    (in particular this test suite's rollback-based isolation, see
+    tests/conftest.py) are unaffected -- cli.py's real `claims extract`
+    command passes True."""
     run = db.get_visibility_run(conn, run_id)
     if run is None:
         raise ValueError(f"visibility_runs {run_id} not found")
@@ -310,12 +363,23 @@ def run_claims_extraction(conn, *, run_id: str, caller: AnswerClaimCaller) -> Cl
                 stats.claims_rejected_unknown_spec += 1
                 continue
 
+            values = _row_values(claim, spec_attribute)
+            if values is None:
+                # The tool call tagged this spec_key but didn't actually
+                # populate the value_* field matching its data_type (or
+                # populated more than one) -- can't be stored without
+                # tripping answer_claims_value_ck either way, so it's
+                # dropped exactly like an unknown spec key rather than
+                # risking a half-guessed value.
+                stats.claims_rejected_value_type_mismatch += 1
+                continue
+
             is_competitor = not _is_own_brand(claim.brand_name, run["brand_name"])
             match = db.resolve_product_by_name(conn, claim.product_name)
             row = {
                 "answer_id": answer["id"], "brand_name": claim.brand_name, "product_name": claim.product_name,
                 "is_competitor": is_competitor, "spec_attribute_id": spec_attribute["id"],
-                "source_quote": claim.source_quote, **_row_values(claim, spec_attribute),
+                "source_quote": claim.source_quote, **values,
             }
 
             if match is None or float(match["score"]) < RESOLUTION_THRESHOLD:
@@ -337,5 +401,8 @@ def run_claims_extraction(conn, *, run_id: str, caller: AnswerClaimCaller) -> Cl
             db.insert_answer_claim(conn, row)
             stats.claims_extracted += 1
             stats.verdict_counts[row["verdict"]] = stats.verdict_counts.get(row["verdict"], 0) + 1
+
+        if commit_each_answer:
+            conn.commit()
 
     return stats

@@ -95,3 +95,28 @@ def test_unexpected_status_is_undetermined(conn):
 
     assert len(stats.undetermined) == len(TEST_AGENTS)
     assert "500" in stats.fetch_error
+
+    # The unexpected-status reason must be PERSISTED, not just kept in the
+    # in-memory stats object -- pdf_report.py reads crawlability_checks.
+    # error directly, and every agent shows allowed=None with no context
+    # for why if this column stays NULL.
+    with conn.cursor() as cur:
+        cur.execute("select error from crawlability_checks where id = %s", (check_id,))
+        assert "500" in cur.fetchone()["error"]
+
+
+def test_robots_txt_url_resolves_to_site_root_ignoring_any_path(conn):
+    org_id, brand_id = _make_org_brand(conn, slug="crawl-path")
+    seen_urls = []
+
+    def recording_fetcher(url):
+        seen_urls.append(url)
+        return FetchResult(status_code=200, text="User-agent: *\nDisallow:", error=None)
+
+    run_crawlability_check(
+        conn, brand_id=brand_id,
+        website_url="https://crawl-path.example/products/catalog?x=1",
+        fetcher=recording_fetcher,
+    )
+
+    assert seen_urls == ["https://crawl-path.example/robots.txt"]

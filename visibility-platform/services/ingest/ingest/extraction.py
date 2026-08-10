@@ -216,20 +216,22 @@ def extract_claims(
     for block in message.content:
         if block.type == "tool_use" and block.name == _TOOL_NAME:
             return ExtractionResult(
-                products=_coerce_array(block.input.get("products", []), wrapper_key="products"),
-                unmapped_findings=_coerce_array(
+                products=coerce_array(block.input.get("products", []), wrapper_key="products"),
+                unmapped_findings=coerce_array(
                     block.input.get("unmapped_findings", []), wrapper_key="unmapped_findings"
                 ),
             )
     return ExtractionResult(products=[], unmapped_findings=[])
 
 
-def _coerce_array(value: Any, *, wrapper_key: str) -> list[dict[str, Any]]:
+def coerce_array(value: Any, *, wrapper_key: str) -> list[dict[str, Any]]:
     """Observed in the wild: the model sometimes double-encodes an array
     field, returning a JSON string (of either the bare array or the whole
     wrapping object) instead of structured content matching the declared
     tool schema. Parse it back rather than let a string reach persistence,
-    where iterating over it yields characters, not dicts."""
+    where iterating over it yields characters, not dicts. Public -- also
+    reused by claims_diff.py's make_anthropic_extractor() (Part 4), same
+    failure mode, same Anthropic tool-use call shape."""
     if isinstance(value, str):
         parsed = json.loads(value)
         value = parsed.get(wrapper_key, parsed) if isinstance(parsed, dict) else parsed
