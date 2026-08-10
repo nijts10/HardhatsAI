@@ -59,6 +59,12 @@ Usage:
     # so --engine here must resolve to exactly one.
     python -m ingest.cli benchmark --brand hunter-douglas --category systeemplafond \\
         --engine openai --resume-run <run-id-from-earlier-output>
+
+    # MVP brief Part 4 -- extract + diff technical claims out of one
+    # benchmark run's answers (visibility_answers) against verified ground
+    # truth (claims). Resumable per-answer: a re-run skips any answer that
+    # already has answer_claims rows.
+    python -m ingest.cli claims extract --run <run-id-from-benchmark-output>
 """
 from __future__ import annotations
 
@@ -68,7 +74,9 @@ import json
 import pathlib
 import sys
 
-from . import benchmark, db, pipeline, report, storage, visibility
+from anthropic import Anthropic
+
+from . import benchmark, claims_diff, db, pipeline, report, storage, visibility
 from .config import load_config
 from .persistence import slugify
 
@@ -436,6 +444,37 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_claims_extract(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    if not config.anthropic_api_key:
+        print("ANTHROPIC_API_KEY is not set")
+        return 1
+
+    caller = claims_diff.make_anthropic_extractor(Anthropic(api_key=config.anthropic_api_key), config.anthropic_model)
+
+    try:
+        stats = claims_diff.run_claims_extraction(conn, run_id=args.run_id, caller=caller)
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        print(str(exc))
+        return 1
+    except Exception:
+        conn.rollback()
+        raise
+    conn.close()
+
+    print(f"run {args.run_id}: {stats.answers_processed} answer(s) processed "
+          f"({stats.answers_skipped_already_done} already done), {stats.claims_extracted} claim(s) extracted "
+          f"({stats.claims_rejected_unverifiable_quote} rejected: unverifiable quote, "
+          f"{stats.claims_rejected_unknown_spec} rejected: unknown spec key)")
+    for verdict, count in sorted(stats.verdict_counts.items()):
+        print(f"  {verdict}: {count}")
+    return 0
+
+
 def cmd_review_list(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.database_url)
@@ -556,6 +595,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue an existing run_id (requires exactly one --engine, a run is engine-locked)",
     )
     p_benchmark_v2.set_defaults(func=cmd_benchmark)
+
+    p_claims = sub.add_parser(
+        "claims", help="MVP brief Part 4: extract + diff technical claims from a visibility run's answers",
+    )
+    claims_sub = p_claims.add_subparsers(dest="claims_command", required=True)
+
+    p_claims_extract = claims_sub.add_parser("extract", help="extract and diff claims for one visibility_runs id")
+    p_claims_extract.add_argument("--run", required=True, dest="run_id")
+    p_claims_extract.set_defaults(func=cmd_claims_extract)
 
     p_review = sub.add_parser("review", help="triage found-but-undefined specs")
     review_sub = p_review.add_subparsers(dest="review_command", required=True)

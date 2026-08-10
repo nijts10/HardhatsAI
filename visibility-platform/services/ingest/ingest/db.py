@@ -438,3 +438,71 @@ def promote_review_queue_entry(conn: psycopg.Connection, entry_id: str, spec_key
 def reject_review_queue_entry(conn: psycopg.Connection, entry_id: str) -> None:
     with conn.cursor() as cur:
         cur.execute("update review_queue set status = 'rejected' where id = %s", (entry_id,))
+
+
+# ---------------------------------------------------------------------
+# Spec-diff (Part 4) -- resolving visibility_answers into answer_claims.
+# ---------------------------------------------------------------------
+
+def get_visibility_run(conn: psycopg.Connection, run_id: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select vr.*, b.name as brand_name
+              from visibility_runs vr
+              join brands b on b.id = vr.brand_id
+             where vr.id = %s
+            """,
+            (run_id,),
+        )
+        return cur.fetchone()
+
+
+def get_visibility_answers_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id, prompt_id, response_text from visibility_answers where run_id = %s order by created_at",
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def has_answer_claims(conn: psycopg.Connection, answer_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("select 1 from answer_claims where answer_id = %s limit 1", (answer_id,))
+        return cur.fetchone() is not None
+
+
+def resolve_product_by_name(conn: psycopg.Connection, name: str) -> Optional[dict]:
+    """Best pg_trgm fuzzy match across ALL products, not scoped to any one
+    brand -- a competitor's product belongs to a different brand_id, and
+    resolving it is exactly the point of extracting competitor claims.
+    Returns None only when `products` itself is empty; otherwise always
+    returns the best match found however weak -- the caller decides
+    whether resolution_score clears the acceptance threshold, this never
+    guesses on its own."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id, name, similarity(name, %s) as score from products order by score desc limit 1",
+            (name,),
+        )
+        return cur.fetchone()
+
+
+def insert_answer_claim(conn: psycopg.Connection, row: dict) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into answer_claims
+              (answer_id, brand_name, product_name, is_competitor, resolved_product_id, resolution_score,
+               spec_attribute_id, value_numeric, value_numeric_max, value_text, value_bool, value_enum, unit,
+               source_quote, verdict, compared_claim_id, confusable_key)
+            values (%(answer_id)s, %(brand_name)s, %(product_name)s, %(is_competitor)s, %(resolved_product_id)s,
+                    %(resolution_score)s, %(spec_attribute_id)s, %(value_numeric)s, %(value_numeric_max)s,
+                    %(value_text)s, %(value_bool)s, %(value_enum)s, %(unit)s, %(source_quote)s, %(verdict)s,
+                    %(compared_claim_id)s, %(confusable_key)s)
+            returning id
+            """,
+            row,
+        )
+        return cur.fetchone()["id"]

@@ -52,7 +52,10 @@ def value_digits_in_snippet(value: float, snippet: str) -> bool:
     return digits in re.sub(r"[^0-9]", "", snippet)
 
 
-def _convert_unit(value: float, from_unit: str | None, to_unit: str | None) -> tuple[float, str | None]:
+def convert_unit(value: float, from_unit: str | None, to_unit: str | None) -> tuple[float, str | None]:
+    """Public -- also reused by claims_diff.py (Part 4) to normalise an AI
+    answer's claimed unit to spec_attributes.unit before comparing against
+    ground truth, same conversion table as document-claim verification."""
     if not from_unit or not to_unit or from_unit.strip().lower() == to_unit.strip().lower():
         return value, to_unit
     factor = _UNIT_CONVERSIONS.get((from_unit.strip().lower(), to_unit.strip().lower()))
@@ -108,8 +111,8 @@ def verify_claim(claim: dict, spec_attribute: dict, page_text: str | None) -> Ve
         if presence == "stated" and not value_digits_in_snippet(claim["value_numeric"], snippet or ""):
             return VerificationResult(False, None, "numeric value's digits do not appear in source_snippet")
 
-        value, unit = _convert_unit(claim["value_numeric"], claim.get("unit"), spec_attribute.get("unit"))
-        value_max, _ = _convert_unit(claim["value_numeric_max"], claim.get("unit"), spec_attribute.get("unit")) \
+        value, unit = convert_unit(claim["value_numeric"], claim.get("unit"), spec_attribute.get("unit"))
+        value_max, _ = convert_unit(claim["value_numeric_max"], claim.get("unit"), spec_attribute.get("unit")) \
             if claim.get("value_numeric_max") is not None else (None, unit)
 
         reason = _check_plausibility(spec_attribute["key"], value, value_max)
