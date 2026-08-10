@@ -76,7 +76,10 @@ import sys
 
 from anthropic import Anthropic
 
-from . import benchmark, claims_diff, crawlability, db, page_visibility, pipeline, report, scoring, storage, visibility
+from . import (
+    benchmark, claims_diff, crawlability, db, page_visibility, pdf_report, pipeline, report, scoring, storage,
+    visibility,
+)
 from .config import load_config
 from .http_fetch import make_httpx_fetcher
 from .persistence import slugify
@@ -601,6 +604,40 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    if args.format != "pdf":
+        print(f"--format {args.format!r} not supported yet -- only 'pdf'")
+        return 1
+
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand)
+    if brand is None:
+        print(f"no brand with slug '{args.brand}'")
+        conn.close()
+        return 1
+
+    output_path = args.output or f"{args.brand}-{args.run_id}-visibility-audit.pdf"
+
+    try:
+        data = pdf_report.generate_pdf_report(conn, run_id=args.run_id, output_path=output_path)
+    except ValueError as exc:
+        conn.close()
+        print(str(exc))
+        return 1
+    conn.close()
+
+    print(f"report written to {output_path}")
+    print(f"  worst findings: {len(data.worst_findings)}, documentation gaps: {len(data.documentation_gaps)}, "
+          f"page-visibility gaps: {len(data.page_visibility_gaps)}, remediation items: {len(data.remediation)}")
+    if not data.crawlability_check:
+        print("  NOTE: no crawlability check on file for this brand -- run `crawlability --brand ...` first")
+    if not data.scorecard.claims_extracted_for_run:
+        print("  NOTE: no answer_claims for this run -- run `claims extract --run ...` first for real numbers")
+    return 0
+
+
 def cmd_review_list(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.database_url)
@@ -764,6 +801,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_score.add_argument("--run", required=True, dest="run_id")
     p_score.set_defaults(func=cmd_score)
+
+    p_report_v2 = sub.add_parser(
+        "report",
+        help="MVP brief Part 7: full PDF visibility-audit report for one run (method, scores, worst "
+             "findings, competitive picture, documentation/page-visibility gaps, remediation)",
+    )
+    p_report_v2.add_argument("--brand", required=True, help="brand slug")
+    p_report_v2.add_argument("--run", required=True, dest="run_id")
+    p_report_v2.add_argument("--format", default="pdf", choices=["pdf"])
+    p_report_v2.add_argument("--output", default=None, help="output path; default <brand>-<run>-visibility-audit.pdf")
+    p_report_v2.set_defaults(func=cmd_report)
 
     p_review = sub.add_parser("review", help="triage found-but-undefined specs")
     review_sub = p_review.add_subparsers(dest="review_command", required=True)

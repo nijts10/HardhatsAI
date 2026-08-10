@@ -660,3 +660,142 @@ def has_any_answer_claims_for_run(conn: psycopg.Connection, run_id: str) -> bool
             (run_id,),
         )
         return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------
+# PDF report (Part 7)
+# ---------------------------------------------------------------------
+
+def get_worst_findings_for_run(conn: psycopg.Connection, run_id: str, limit: int = 10) -> list[dict]:
+    """Own-brand incorrect/likely_confusion claims, worst (flatly wrong)
+    first -- everything a citation needs to trace back to document+page+
+    quote is joined in here: the ground-truth claim via compared_claim_id,
+    and from there its document_version -> document."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select
+              ac.id as answer_claim_id, ac.verdict::text as verdict, ac.product_name, ac.source_quote,
+              ac.value_numeric, ac.value_numeric_max, ac.value_text, ac.value_bool, ac.value_enum, ac.unit,
+              ac.confusable_key,
+              sa.key as spec_key, sa.name_nl as spec_name_nl, sa.name_en as spec_name_en,
+              p.text as prompt_text, p.intent::text as intent,
+              va.citations, va.resolved_model_version,
+              vr.engine::text as engine,
+              gt.value_numeric as gt_value_numeric, gt.value_numeric_max as gt_value_numeric_max,
+              gt.value_text as gt_value_text, gt.value_bool as gt_value_bool, gt.value_enum as gt_value_enum,
+              gt.unit as gt_unit, gt.page_number as gt_page_number, gt.source_snippet as gt_source_snippet,
+              d.title as gt_document_title
+            from answer_claims ac
+            join visibility_answers va on va.id = ac.answer_id
+            join visibility_runs vr on vr.id = va.run_id
+            join prompts p on p.id = va.prompt_id
+            join spec_attributes sa on sa.id = ac.spec_attribute_id
+            left join claims gt on gt.id = ac.compared_claim_id
+            left join document_versions dv on dv.id = gt.document_version_id
+            left join documents d on d.id = dv.document_id
+            where va.run_id = %s and not ac.is_competitor and ac.verdict in ('incorrect', 'likely_confusion')
+            order by (ac.verdict = 'incorrect') desc, ac.created_at
+            limit %s
+            """,
+            (run_id, limit),
+        )
+        return cur.fetchall()
+
+
+def get_brand_mentions_by_intent_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    """One row per DISTINCT (answer, brand) pair, for mention-count
+    aggregation in the competitive picture -- same dedup rule as Part 6's
+    share_of_voice, but keeping brand_name/is_competitor for display."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct on (ac.answer_id, lower(trim(ac.brand_name)))
+                   p.intent::text as intent, ac.brand_name, ac.is_competitor
+              from answer_claims ac
+              join visibility_answers va on va.id = ac.answer_id
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s
+             order by ac.answer_id, lower(trim(ac.brand_name))
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def get_claim_verdicts_by_brand_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    """Every answer_claims row (not deduped) with brand/verdict, for the
+    per-brand accuracy breakdown in the competitive picture."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select p.intent::text as intent, ac.brand_name, ac.is_competitor, ac.verdict::text as verdict
+              from answer_claims ac
+              join visibility_answers va on va.id = ac.answer_id
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def get_documentation_gaps_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    """Own-brand unverifiable_spec claims -- the AI made a claim, but there
+    is no current ground truth (no row, or explicitly not_stated) to check
+    it against. Never an error; framed as a documentation gap."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select ac.product_name, sa.key as spec_key, sa.name_nl as spec_name_nl, sa.name_en as spec_name_en,
+                   p.intent::text as intent, p.text as prompt_text, ac.source_quote
+              from answer_claims ac
+              join visibility_answers va on va.id = ac.answer_id
+              join prompts p on p.id = va.prompt_id
+              join spec_attributes sa on sa.id = ac.spec_attribute_id
+             where va.run_id = %s and not ac.is_competitor and ac.verdict = 'unverifiable_spec'
+             order by sa.key, ac.product_name
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def get_latest_crawlability_check(conn: psycopg.Connection, brand_id: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select * from crawlability_checks where brand_id = %s order by fetched_at desc limit 1",
+            (brand_id,),
+        )
+        return cur.fetchone()
+
+
+def get_crawlability_agents(conn: psycopg.Connection, check_id: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("select * from crawlability_agents where check_id = %s order by agent_name", (check_id,))
+        return cur.fetchall()
+
+
+def get_latest_page_visibility_checks(conn: psycopg.Connection, brand_id: str) -> list[dict]:
+    """Most recent check per (product, claim) -- page_spec_visibility is
+    append-only history, so a naive `where value_found_as_text = false`
+    could surface a STALE finding that's since been fixed. Returns every
+    latest check regardless of outcome; callers filter to gaps themselves
+    so "latest" and "is a gap" never get conflated into one WHERE clause
+    fighting the DISTINCT ON ordering."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct on (pv.product_id, pv.claim_id)
+                   pv.*, pr.name as product_name, sa.key as spec_key,
+                   sa.name_nl as spec_name_nl, sa.name_en as spec_name_en
+              from page_spec_visibility pv
+              join products pr on pr.id = pv.product_id
+              join claims c on c.id = pv.claim_id
+              join spec_attributes sa on sa.id = c.spec_attribute_id
+             where pr.brand_id = %s
+             order by pv.product_id, pv.claim_id, pv.fetched_at desc
+            """,
+            (brand_id,),
+        )
+        return cur.fetchall()
