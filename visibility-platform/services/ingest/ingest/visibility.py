@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import psycopg
-from psycopg.types.json import Json
+from psycopg.types.json import Json, Jsonb
 
 
 @dataclass
@@ -365,7 +365,7 @@ def run_visibility(
         with conn.cursor() as cur:
             cur.execute(
                 "update visibility_runs set stats = stats || %s where id = %s",
-                (Json({"last_stop_reason": str(stop_reason)}), run_id),
+                (Jsonb({"last_stop_reason": str(stop_reason)}), run_id),
             )
         return run_id, stats
     except Exception as exc:
@@ -390,12 +390,12 @@ def run_visibility(
             cur.execute(
                 "update visibility_runs set status = 'succeeded', finished_at = now(), "
                 "stats = stats || %s where id = %s",
-                (Json({"total_answers": total_answers}), run_id),
+                (Jsonb({"total_answers": total_answers}), run_id),
             )
         else:
             cur.execute(
                 "update visibility_runs set stats = stats || %s where id = %s",
-                (Json({"total_answers": total_answers,
+                (Jsonb({"total_answers": total_answers,
                        "last_stop_reason": f"{expected_total - total_answers} answer(s) failed this pass "
                                            f"-- resume with --resume-run {run_id} to retry them"}), run_id),
             )
