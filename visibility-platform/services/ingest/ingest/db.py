@@ -596,3 +596,67 @@ def insert_page_spec_visibility(conn: psycopg.Connection, row: dict) -> str:
             row,
         )
         return cur.fetchone()["id"]
+
+
+# ---------------------------------------------------------------------
+# Scoring (Part 6) -- all scoped to one visibility_runs id.
+# ---------------------------------------------------------------------
+
+def get_answers_with_intent_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select va.response_text, p.intent::text as intent
+              from visibility_answers va
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def get_distinct_brand_mentions_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    """One row per DISTINCT (answer, brand) pair -- share_of_voice counts
+    conversations a brand appeared in, not raw claim volume. Brand names
+    are deduped case/whitespace-insensitively within an answer so e.g.
+    "Acme" and "ACME" claimed twice in one answer don't double-count."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct on (ac.answer_id, lower(trim(ac.brand_name)))
+                   p.intent::text as intent, ac.is_competitor
+              from answer_claims ac
+              join visibility_answers va on va.id = ac.answer_id
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s
+             order by ac.answer_id, lower(trim(ac.brand_name))
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def get_own_brand_claim_verdicts_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select ac.verdict::text as verdict, p.intent::text as intent
+              from answer_claims ac
+              join visibility_answers va on va.id = ac.answer_id
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s and not ac.is_competitor
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
+def has_any_answer_claims_for_run(conn: psycopg.Connection, run_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select 1 from answer_claims ac join visibility_answers va on va.id = ac.answer_id "
+            "where va.run_id = %s limit 1",
+            (run_id,),
+        )
+        return cur.fetchone() is not None

@@ -76,7 +76,7 @@ import sys
 
 from anthropic import Anthropic
 
-from . import benchmark, claims_diff, crawlability, db, page_visibility, pipeline, report, storage, visibility
+from . import benchmark, claims_diff, crawlability, db, page_visibility, pipeline, report, scoring, storage, visibility
 from .config import load_config
 from .http_fetch import make_httpx_fetcher
 from .persistence import slugify
@@ -564,6 +564,43 @@ def cmd_claims_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_rate(value) -> str:
+    return f"{value:.0%}" if value is not None else "no data"
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    try:
+        card = scoring.compute_scorecard(conn, run_id=args.run_id)
+    except ValueError as exc:
+        conn.close()
+        print(str(exc))
+        return 1
+    conn.close()
+
+    print(f"scorecard for run {card.run_id} ({card.brand_name}):")
+    if not card.claims_extracted_for_run:
+        print("  WARNING: no answer_claims found for this run -- share_of_voice and spec_accuracy "
+              "will show 'no data' until `claims extract --run <id>` has been run")
+
+    print(f"  presence_rate:    overall {_format_rate(card.presence_rate.overall)}")
+    for intent, value in sorted(card.presence_rate.per_intent.items()):
+        print(f"                    {intent}: {_format_rate(value)}")
+
+    print(f"  share_of_voice:   overall {_format_rate(card.share_of_voice.overall)}")
+    for intent, value in sorted(card.share_of_voice.per_intent.items()):
+        print(f"                    {intent}: {_format_rate(value)}")
+
+    print(f"  spec_accuracy:    overall {_format_rate(card.spec_accuracy.overall)}")
+    for intent, value in sorted(card.spec_accuracy.per_intent.items()):
+        print(f"                    {intent}: {_format_rate(value)}")
+
+    print(f"  data_completeness: {_format_rate(card.data_completeness)} (brand-level, not run/intent-scoped)")
+    return 0
+
+
 def cmd_review_list(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.database_url)
@@ -719,6 +756,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_page_visibility.add_argument("--brand", required=True, help="brand slug")
     p_page_visibility.set_defaults(func=cmd_page_visibility)
+
+    p_score = sub.add_parser(
+        "score",
+        help="MVP brief Part 6: the four independent scores (presence rate, share of voice, "
+             "spec accuracy, data completeness), overall and per prompt-intent, for one run",
+    )
+    p_score.add_argument("--run", required=True, dest="run_id")
+    p_score.set_defaults(func=cmd_score)
 
     p_review = sub.add_parser("review", help="triage found-but-undefined specs")
     review_sub = p_review.add_subparsers(dest="review_command", required=True)
