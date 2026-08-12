@@ -48,6 +48,34 @@ def test_stated_claim_rejected_when_snippet_not_on_page():
     assert "not found verbatim" in result.rejection_reason
 
 
+def test_stated_claim_strips_derivation_note_left_over_from_model_output():
+    # claims_derivation_note_ck only allows derivation_note when
+    # presence='derived' -- a 'stated' claim carrying one (observed for an
+    # "n/a" table cell) must be normalized clean here, not left for the DB
+    # constraint to catch as a crash.
+    claim = {
+        "key": "fire_resistance_ei", "value_numeric": 60, "unit": "min", "presence": "stated",
+        "page_number": 4, "source_snippet": "Brandwerendheid EI 60 volgens NEN-EN 13501-2",
+        "derivation_note": "Value shown as n/a in table for this variant",
+    }
+    page_text = "Brandwerendheid EI 60 volgens NEN-EN 13501-2"
+    result = verify_claim(claim, FIRE_ATTR, page_text)
+    assert result.ok
+    assert result.normalized_claim["derivation_note"] is None
+
+
+def test_derived_claim_keeps_its_derivation_note():
+    claim = {
+        "key": "fire_resistance_ei", "value_numeric": 60, "unit": "min", "presence": "derived",
+        "page_number": 4, "source_snippet": "Brandwerendheid EI 60 volgens NEN-EN 13501-2",
+        "derivation_note": "Computed from the stated EI classification.",
+    }
+    page_text = "Brandwerendheid EI 60 volgens NEN-EN 13501-2"
+    result = verify_claim(claim, FIRE_ATTR, page_text)
+    assert result.ok
+    assert result.normalized_claim["derivation_note"] == "Computed from the stated EI classification."
+
+
 def test_stated_claim_rejected_when_digits_dont_match_snippet():
     claim = {
         "key": "fire_resistance_ei", "value_numeric": 90, "unit": "min", "presence": "stated",

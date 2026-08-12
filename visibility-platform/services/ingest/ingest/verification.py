@@ -107,6 +107,18 @@ def verify_claim(claim: dict, spec_attribute: dict, page_text: str | None) -> Ve
 
     normalized = dict(claim)
 
+    # claims_derivation_note_ck (0009_derived_claim_verification.sql) only
+    # allows a non-null derivation_note when presence = 'derived'. The
+    # extraction prompt tells the model the same rule, but it isn't always
+    # followed in practice (observed: a 'stated' claim for an "n/a" table
+    # cell, with the model's explanation left in derivation_note) -- that
+    # crashed the DB insert with a CheckViolation instead of being caught
+    # here like every other malformed claim. Strip it defensively, mirroring
+    # the not_stated branch above, rather than let the DB constraint be the
+    # only thing standing between bad model output and a crash.
+    if presence != "derived":
+        normalized["derivation_note"] = None
+
     if claim.get("value_numeric") is not None:
         if presence == "stated" and not value_digits_in_snippet(claim["value_numeric"], snippet or ""):
             return VerificationResult(False, None, "numeric value's digits do not appear in source_snippet")
