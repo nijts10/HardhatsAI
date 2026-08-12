@@ -402,6 +402,36 @@ def test_extra_stray_value_field_is_discarded_not_inserted(conn):
     assert row["value_text"] is None
 
 
+def test_inverted_numeric_range_drops_max_instead_of_crashing(conn):
+    # Observed in a real run: the model used value_numeric/value_numeric_max
+    # to express two alternate values for different variants ("αw = 1.00 for
+    # black, or 0.95 for other colours"), not a true min/max range, and left
+    # max < min -- answer_claims_range_ck requires max >= min. Must be
+    # normalised (max dropped, min kept as a single point value), not crash
+    # the whole extraction run over one imprecise LLM response.
+    org_id, brand_id = _make_org_brand(conn, slug="inverted-range")
+    category_id = _systeemplafond_category(conn)
+    _make_spec_attribute(conn, key="spec_inverted_range", data_type="numeric", unit=None)
+    run_id = _make_run(conn, organization_id=org_id, brand_id=brand_id, category_id=category_id)
+
+    response_text = "Acme Felt Panel has spec_inverted_range of 1.00 (black) or 0.95 (other colours)."
+    answer_id = _make_answer(conn, run_id=run_id, category_id=category_id, response_text=response_text)
+
+    claim = [{
+        "brand_name": "Acme", "product_name": "Acme Felt Panel", "spec_key": "spec_inverted_range",
+        "value_numeric": 1.00, "value_numeric_max": 0.95,
+        "source_quote": "spec_inverted_range of 1.00 (black) or 0.95 (other colours)",
+    }]
+    stats = run_claims_extraction(conn, run_id=run_id, caller=_canned_extractor(claim))
+
+    assert stats.claims_extracted == 1
+    with conn.cursor() as cur:
+        cur.execute("select value_numeric, value_numeric_max from answer_claims where answer_id = %s", (answer_id,))
+        row = cur.fetchone()
+    assert float(row["value_numeric"]) == 1.00
+    assert row["value_numeric_max"] is None
+
+
 def test_anthropic_extractor_unwraps_double_encoded_claims_string():
     # Same failure mode extraction.py's coerce_array guards against: the
     # model sometimes returns the "claims" field as a JSON-encoded string

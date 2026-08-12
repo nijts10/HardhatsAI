@@ -281,6 +281,17 @@ def _row_values(claim: ExtractedAnswerClaim, spec_attribute: dict) -> Optional[d
         value_numeric_max = None
         if claim.value_numeric_max is not None:
             value_numeric_max, _ = convert_unit(claim.value_numeric_max, claim.unit, unit)
+            # answer_claims_range_ck requires value_numeric_max >= value_numeric.
+            # Observed in practice: the model uses value_numeric/value_numeric_max
+            # to express two alternate values for different variants ("αw = 1.00
+            # for black, or 0.95 for other colours"), not a true min/max range,
+            # and doesn't order them -- that crashed the insert instead of being
+            # caught here like every other malformed claim. Not safe to guess
+            # which of the two the model actually meant as the "real" value, so
+            # drop the invalid max and keep value_numeric as a single point
+            # value rather than reject the whole claim.
+            if value_numeric_max < value_numeric:
+                value_numeric_max = None
         return {"value_numeric": value_numeric, "value_numeric_max": value_numeric_max,
                 "value_text": None, "value_bool": None, "value_enum": None, "unit": unit}
     if data_type == "boolean":

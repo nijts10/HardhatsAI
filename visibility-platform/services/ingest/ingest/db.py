@@ -16,7 +16,16 @@ from psycopg.types.json import Json
 
 
 def connect(database_url: str) -> psycopg.Connection:
-    return psycopg.connect(database_url, row_factory=dict_row, autocommit=False)
+    # TCP keepalives -- without these, a long-running command (e.g. `benchmark`,
+    # which leaves the connection idle for tens of seconds between answers while
+    # waiting on a slow web-search-grounded API call) reproducibly hit "the
+    # connection is lost" against the remote Supabase pooler (observed 3x in a
+    # row during a real run). Standard libpq keepalive params, not a behavior
+    # change to anything query-related.
+    return psycopg.connect(
+        database_url, row_factory=dict_row, autocommit=False,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5,
+    )
 
 
 # ---------------------------------------------------------------------
