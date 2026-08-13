@@ -51,6 +51,16 @@ class Config:
     # visibility.py's run_visibility().
     visibility_max_answers_per_run: int
     visibility_cost_ceiling_usd: float
+    # Engines excluded from the DEFAULT "run all three" set when `benchmark`
+    # is called with no --engine flag at all -- an explicit `--engine
+    # anthropic` still works regardless, this only changes what happens when
+    # nothing is specified. Comma-separated, e.g. "anthropic". Added
+    # 2026-08-13: Anthropic's web_search tool had no max_uses cap and real
+    # cost came in ~5.5x the estimate ($14.46 for one 150-answer run) --
+    # stijn asked to disable it as a default engine until that's addressed,
+    # not remove the capability. Re-enable by clearing
+    # VISIBILITY_DISABLED_ENGINES in .env.
+    visibility_disabled_engines: tuple[str, ...]
 
     embedding_dimensions: int = EMBEDDING_DIMENSIONS
 
@@ -73,6 +83,9 @@ def load_config() -> Config:
         visibility_gemini_model=os.environ.get("VISIBILITY_GEMINI_MODEL", "gemini-2.0-flash"),
         visibility_max_answers_per_run=int(os.environ.get("VISIBILITY_MAX_ANSWERS_PER_RUN", "500")),
         visibility_cost_ceiling_usd=float(os.environ.get("VISIBILITY_COST_CEILING_USD", "50")),
+        visibility_disabled_engines=tuple(
+            e.strip() for e in os.environ.get("VISIBILITY_DISABLED_ENGINES", "").split(",") if e.strip()
+        ),
     )
 
 

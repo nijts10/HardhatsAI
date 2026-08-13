@@ -489,7 +489,14 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         print(f"no category with code '{args.category}'")
         return 1
 
-    engines = args.engine or ["openai", "anthropic", "gemini"]
+    if args.engine:
+        engines = args.engine
+    else:
+        engines = [e for e in ["openai", "anthropic", "gemini"] if e not in config.visibility_disabled_engines]
+        skipped = [e for e in ["openai", "anthropic", "gemini"] if e in config.visibility_disabled_engines]
+        if skipped:
+            print(f"skipping {', '.join(skipped)} (VISIBILITY_DISABLED_ENGINES) -- "
+                  f"pass --engine {skipped[0]} explicitly to run it anyway")
 
     if args.resume_run and len(engines) != 1:
         print("--resume-run requires exactly one --engine (a run is locked to a single engine)")
