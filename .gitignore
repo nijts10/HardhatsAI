@@ -21,8 +21,11 @@ obj/
 # OS
 .DS_Store
 
-# Raw manufacturer source documents (visibility-platform) — copyrighted,
-# large binaries; provenance for what's ingested lives in the DB
-# (document_versions.source_url/retrieved_at), not in git.
-visibility-platform/docs/
+# Raw manufacturer source documents and generated reports (visibility-
+# platform) — copyrighted/large binaries; provenance for what's ingested
+# lives in the DB (document_versions.source_url/retrieved_at), not in git.
+# Narrower than "visibility-platform/docs/" on purpose -- design docs like
+# prompt-taxonomy-proposal.md live directly under docs/ and should be
+# tracked.
+visibility-platform/docs/hd/
 visibility-platform/Hunter douglass/
