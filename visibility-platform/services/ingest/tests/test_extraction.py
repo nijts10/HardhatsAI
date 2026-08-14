@@ -93,6 +93,7 @@ def test_build_prompt_includes_vocabulary_brand_name_and_forbids_invented_keys()
     assert "ONLY use these keys" in prompt
     assert "Brandwerendheid EI 60" in prompt
     assert "unmapped_findings" in prompt
+    assert "value_numeric_max" in prompt
 
 
 def test_extract_claims_passes_variants_through_untouched():

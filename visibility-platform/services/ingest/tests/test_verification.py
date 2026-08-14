@@ -81,6 +81,37 @@ def test_stated_claim_with_no_value_field_set_is_rejected():
     assert "value fields set" in result.rejection_reason
 
 
+def test_stated_range_with_fabricated_max_is_rejected():
+    # value_numeric_max previously only got a plausibility check, never the
+    # digit-in-snippet check value_numeric already had -- a claim could pass
+    # verification with a correct low bound but a fabricated high bound the
+    # document never stated. Found reasoning about rule 8 (genuine ranges),
+    # 2026-08-14: now that the prompt actively asks for value_numeric_max on
+    # ranges, both bounds need the same anti-hallucination bar.
+    claim = {
+        "key": "fire_resistance_ei", "value_numeric": 60, "value_numeric_max": 999,
+        "unit": "min", "presence": "stated", "page_number": 4,
+        "source_snippet": "Brandwerendheid EI 60 volgens NEN-EN 13501-2",
+    }
+    page_text = "Brandwerendheid EI 60 volgens NEN-EN 13501-2"
+    result = verify_claim(claim, FIRE_ATTR, page_text)
+    assert not result.ok
+    assert "value_numeric_max" in result.rejection_reason
+
+
+def test_stated_range_with_both_bounds_in_snippet_passes():
+    claim = {
+        "key": "fire_resistance_ei", "value_numeric": 60, "value_numeric_max": 90,
+        "unit": "min", "presence": "stated", "page_number": 4,
+        "source_snippet": "Brandwerendheid EI 60-90 volgens NEN-EN 13501-2",
+    }
+    page_text = "Brandwerendheid EI 60-90 volgens NEN-EN 13501-2"
+    result = verify_claim(claim, FIRE_ATTR, page_text)
+    assert result.ok
+    assert result.normalized_claim["value_numeric"] == 60
+    assert result.normalized_claim["value_numeric_max"] == 90
+
+
 def test_derived_claim_keeps_its_derivation_note():
     claim = {
         "key": "fire_resistance_ei", "value_numeric": 60, "unit": "min", "presence": "derived",

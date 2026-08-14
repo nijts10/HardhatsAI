@@ -17,7 +17,13 @@ from anthropic import Anthropic
 # parse_pdf docstring/comments) -- upstream of extraction itself, but stamped
 # here since this is the version recorded per extraction_runs row.
 PARSER_VERSION = "2"
-PROMPT_VERSION = "1"
+# Bumped 2026-08-14: added rule 8 (genuine ranges -> value_numeric +
+# value_numeric_max, never a picked/averaged single value) after observing
+# the model collapse a stated "0,75 - 0,95" range into value_numeric=0.85
+# with presence 'stated' -- correctly rejected by the digit-in-snippet
+# check (0.85 isn't either bound), but the underlying fact was then lost
+# entirely instead of captured as the range it actually is.
+PROMPT_VERSION = "2"
 
 _TOOL_NAME = "emit_products"
 
@@ -195,6 +201,19 @@ Rules:
    product level (in the product's own "claims"), not repeated under each
    variant — only put a spec under a variant when its value genuinely
    differs from variant to variant.
+8. If the document states a genuine RANGE for one numeric spec (e.g.
+   "0,75 - 0,95" or "10-14 mm"), that is ONE stated fact about one
+   value, not two variants and not something to average/collapse into a
+   single number. Set value_numeric to the range's low end and
+   value_numeric_max to its high end, keep presence 'stated' (you are
+   not computing anything, just recording both bounds as written), and
+   source_snippet must be the full range exactly as written — never
+   just one bound, and never a value you picked from within the range
+   (e.g. do not write value_numeric 0.85 for "0,75 - 0,95"; that is
+   neither bound, it is an unstated computed midpoint and will be
+   rejected). European-style decimal commas (0,90) are the actual
+   verbatim text in some documents — copy the snippet exactly as
+   printed, comma or point, whichever the source uses.
 
 Document chunks:
 

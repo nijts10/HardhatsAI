@@ -139,6 +139,17 @@ def verify_claim(claim: dict, spec_attribute: dict, page_text: str | None) -> Ve
     if claim.get("value_numeric") is not None:
         if presence == "stated" and not value_digits_in_snippet(claim["value_numeric"], snippet or ""):
             return VerificationResult(False, None, "numeric value's digits do not appear in source_snippet")
+        # value_numeric_max only ever got a plausibility check, never this
+        # same digit-in-snippet check -- a real gap now that the prompt
+        # (rule 8, 2026-08-14) actively asks the model for genuine ranges:
+        # value_numeric passing the check said nothing about whether the
+        # high end was actually in the document too, only that the low end
+        # was. Same anti-hallucination bar, just the second number.
+        if (
+            presence == "stated" and claim.get("value_numeric_max") is not None
+            and not value_digits_in_snippet(claim["value_numeric_max"], snippet or "")
+        ):
+            return VerificationResult(False, None, "value_numeric_max's digits do not appear in source_snippet")
 
         value, unit = convert_unit(claim["value_numeric"], claim.get("unit"), spec_attribute.get("unit"))
         value_max, _ = convert_unit(claim["value_numeric_max"], claim.get("unit"), spec_attribute.get("unit")) \
