@@ -64,6 +64,23 @@ def test_stated_claim_strips_derivation_note_left_over_from_model_output():
     assert result.normalized_claim["derivation_note"] is None
 
 
+def test_stated_claim_with_no_value_field_set_is_rejected():
+    # claims_value_ck requires exactly one of value_numeric/value_text/
+    # value_bool/value_enum set when presence != 'not_stated'. Found for
+    # real re-running extraction on a dense comparison table: the model
+    # quoted an "n/a" cell verbatim as source_snippet with presence
+    # 'stated' but left every value field null instead of using
+    # 'not_stated' for it -- crashed the DB insert on claims_value_ck
+    # instead of being caught here like every other malformed claim.
+    claim = {
+        "key": "fire_resistance_ei", "unit": None, "presence": "stated",
+        "page_number": 1, "source_snippet": "n/a",
+    }
+    result = verify_claim(claim, FIRE_ATTR, "Some table cell says n/a here.")
+    assert not result.ok
+    assert "value fields set" in result.rejection_reason
+
+
 def test_derived_claim_keeps_its_derivation_note():
     claim = {
         "key": "fire_resistance_ei", "value_numeric": 60, "unit": "min", "presence": "derived",

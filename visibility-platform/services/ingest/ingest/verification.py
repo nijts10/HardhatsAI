@@ -104,6 +104,23 @@ def verify_claim(claim: dict, spec_attribute: dict, page_text: str | None) -> Ve
             return VerificationResult(False, None, f"no page text available for page {page_number} to verify against")
         if not snippet_in_page(snippet, page_text):
             return VerificationResult(False, None, "source_snippet not found verbatim on cited page")
+        # claims_value_ck requires exactly one of the four value columns set
+        # when presence isn't 'not_stated'. Observed for real: the model
+        # citing a table's "n/a"/"-" cell verbatim as source_snippet but
+        # leaving every value field null instead of using presence
+        # 'not_stated' (no citation needed) for it -- same family of
+        # inconsistent "n/a" handling as the derivation_note gap above, just
+        # hitting a different column. Reject here rather than let the DB
+        # CheckViolation be the only thing catching it.
+        value_fields_set = sum(
+            claim.get(f) is not None
+            for f in ("value_numeric", "value_text", "value_bool", "value_enum")
+        )
+        if value_fields_set != 1:
+            return VerificationResult(
+                False, None,
+                f"{presence} claim has {value_fields_set} value fields set, expected exactly 1",
+            )
 
     normalized = dict(claim)
 
