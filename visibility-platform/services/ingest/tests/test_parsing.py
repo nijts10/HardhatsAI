@@ -59,6 +59,42 @@ def test_parse_pdf_extracts_ruled_table():
     assert rows[2] == ["B", "90"]
 
 
+def test_parse_pdf_appends_table_text_in_reading_order_for_verbatim_matching():
+    # Found for real auditing a dense Hunter Douglas comparison table
+    # (2026-08-14): a cell whose content wraps to more than one line lands
+    # on a different y-coordinate than its row neighbours, so pdfplumber's
+    # spatial extract_text() splits it across lines and interleaves it with
+    # the NEXT column's value instead of keeping it with its own row --
+    # "Unperforated linear grill ceiling panel" (one cell) came out as
+    # "...ceiling 0.90\npanel..." (0.90 is the cell to its right). Every
+    # claim quoting that cell verbatim then failed verify_claim's citation
+    # check even though the model read the table correctly. page.text must
+    # still contain the phrase as one contiguous (whitespace-normalised)
+    # run, from the table's own row-major order, alongside whatever
+    # extract_text() produced.
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    cell_style = ParagraphStyle("cell", fontSize=8, leading=10)
+    rows = [
+        [Paragraph("Material", cell_style), Paragraph("Description", cell_style),
+         Paragraph("Absorption alpha w", cell_style)],
+        [Paragraph("Aluminum", cell_style), Paragraph("Unperforated linear grill ceiling panel", cell_style),
+         Paragraph("0.90", cell_style)],
+    ]
+    table = Table(rows, colWidths=[60, 120, 60])
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    doc.build([table])
+    pdf_bytes = buf.getvalue()
+
+    pages = parse_pdf(pdf_bytes)
+
+    from ingest.verification import snippet_in_page
+    assert snippet_in_page("Unperforated linear grill ceiling panel", pages[0].text)
+
+
 def test_parse_pdf_falls_back_to_vision_for_sparse_text_layer():
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)

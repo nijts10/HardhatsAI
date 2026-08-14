@@ -51,6 +51,31 @@ def parse_pdf(pdf_bytes: bytes, vision_extractor=None) -> list[ParsedPage]:
         for i, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
             words = page.extract_words(extra_attrs=["size"]) or []
+            tables = [
+                Table(rows=t.extract(), top=t.bbox[1], bottom=t.bbox[3])
+                for t in page.find_tables()
+                if t.extract()
+            ]
+            # extract_text()'s reading order is spatial (top-to-bottom,
+            # left-to-right by word position) and reliably scrambles a
+            # multi-column table -- adjacent cells on the same visual row
+            # interleave word-by-word instead of staying grouped by cell,
+            # especially once any cell wraps to more than one line. Verified
+            # for real on a dense 5-column Hunter Douglas comparison table
+            # (2026-08-14): phrases like "Unperforated linear grill ceiling
+            # panel" that are contiguous in the source table never appeared
+            # as a contiguous substring in extract_text()'s output, so every
+            # claim quoting that table failed verify_claim's verbatim check
+            # even though the model read the (correctly row/column-ordered,
+            # see chunking.py's _table_to_markdown) table content correctly.
+            # Appending each table's own row-major text alongside the
+            # existing extract_text() output -- not replacing it, prose text
+            # outside tables is already extracted correctly -- gives the
+            # verbatim check the same clean reading order the model saw.
+            for table in tables:
+                table_text = _rows_to_plain_text(table.rows)
+                if table_text:
+                    text = (text + "\n" + table_text) if text else table_text
             layout = {
                 "width": page.width,
                 "height": page.height,
@@ -64,11 +89,6 @@ def parse_pdf(pdf_bytes: bytes, vision_extractor=None) -> list[ParsedPage]:
                 ],
             }
             lines, median_size = _group_lines(words)
-            tables = [
-                Table(rows=t.extract(), top=t.bbox[1], bottom=t.bbox[3])
-                for t in page.find_tables()
-                if t.extract()
-            ]
 
             used_vision = False
             if len(text.strip()) < MIN_TEXT_LAYER_CHARS and vision_extractor is not None:
@@ -81,6 +101,22 @@ def parse_pdf(pdf_bytes: bytes, vision_extractor=None) -> list[ParsedPage]:
                 tables=tables, lines=lines, median_font_size=median_size,
             ))
     return pages
+
+
+def _rows_to_plain_text(rows: list[list[str | None]]) -> str:
+    """Row-major, reading-order text for a table -- cells left to right,
+    rows top to bottom, one row per line. Deliberately plain (no markdown
+    pipes) since this feeds the verbatim source_snippet check, which does a
+    literal substring match against page text; a `|` the model never quoted
+    would only get in the way. See chunking.py's _table_to_markdown for the
+    separate, markdown-formatted serialization used in the LLM prompt."""
+    lines = []
+    for row in rows:
+        cells = [(cell or "").strip() for cell in row]
+        line = " ".join(c for c in cells if c)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _group_lines(words: list[dict], y_tolerance: float = 2.0) -> tuple[list[Line], float]:

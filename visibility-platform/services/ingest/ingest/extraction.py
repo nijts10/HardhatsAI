@@ -12,7 +12,11 @@ from typing import Any
 
 from anthropic import Anthropic
 
-PARSER_VERSION = "1"
+# Bumped 2026-08-14: parsing.py now appends each table's own row-major text
+# to the page text it hands to the verbatim-citation check (see parsing.py's
+# parse_pdf docstring/comments) -- upstream of extraction itself, but stamped
+# here since this is the version recorded per extraction_runs row.
+PARSER_VERSION = "2"
 PROMPT_VERSION = "1"
 
 _TOOL_NAME = "emit_products"
