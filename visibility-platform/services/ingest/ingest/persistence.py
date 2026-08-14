@@ -52,21 +52,34 @@ def _values_equal(existing: dict, normalized: dict) -> bool:
 
 def _upsert_product(conn: psycopg.Connection, *, brand_id: str, category_id: str | None,
                      name: str, manufacturer_ref: str | None) -> str:
-    # Look up by slug, not by a raw (name, manufacturer_ref) equality check.
-    # The AI re-extracting the same document can return the same product
-    # with slightly different capitalization/whitespace on manufacturer_ref
-    # between calls (observed in practice: "Rockwool" vs "ROCKWOOL") -- an
-    # exact-string lookup misses the existing row in that case, while
-    # slugify() normalizes both to the same slug, so the fallback insert
-    # then collides with products.slug's unique constraint. Matching on the
-    # same normalized value the DB actually enforces uniqueness on avoids
-    # that split entirely.
-    slug = slugify(name, manufacturer_ref)
+    # Look up by slug of NAME ONLY -- manufacturer_ref must never be part of
+    # the identity key. Originally it was (see git history), to survive
+    # casing/whitespace drift in manufacturer_ref between extraction calls
+    # ("Rockwool" vs "ROCKWOOL"). But the same drift happens far more
+    # destructively when a document simply doesn't STATE a manufacturer_ref
+    # at all: observed for real across the HeartFelt line (2026-08-14) --
+    # two documents both plainly say "HeartFelt® Origami" (identical name,
+    # verified against the source PDFs) but one extraction call emitted
+    # manufacturer_ref="Hunter Douglas Europe B.V." and the other left it
+    # None, which produced two DIFFERENT slugs and therefore two DIFFERENT
+    # product rows -- each holding only HALF the real product's ground
+    # truth (claims split 38/5 across them), silently, with no error raised
+    # anywhere. A per-document manufacturer_ref is optional supplementary
+    # data, not part of what makes two mentions "the same product"; only
+    # name (scoped to this brand's extraction) should decide that.
+    slug = slugify(name)
     with conn.cursor() as cur:
-        cur.execute("select id from products where slug = %s", (slug,))
+        cur.execute("select id, manufacturer_ref from products where slug = %s", (slug,))
         existing = cur.fetchone()
         if existing:
-            cur.execute("update products set name = %s where id = %s", (name, existing["id"]))
+            # Backfill manufacturer_ref if a later call supplies one and the
+            # existing row doesn't have one yet -- never overwrite a value
+            # that's already there with a possibly-worse one from this call.
+            new_ref = manufacturer_ref if existing["manufacturer_ref"] is None else existing["manufacturer_ref"]
+            cur.execute(
+                "update products set name = %s, manufacturer_ref = %s where id = %s",
+                (name, new_ref, existing["id"]),
+            )
             return existing["id"]
 
     return db.create_product(

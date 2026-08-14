@@ -193,10 +193,11 @@ def test_persist_rejects_uncited_stated_claim_but_keeps_product(conn):
 def test_persist_upsert_product_dedupes_by_slug_despite_manufacturer_ref_casing_drift(conn):
     # Observed against a real document: re-extracting the same PDF returned
     # manufacturer_ref with different capitalization between calls
-    # ("Rockwool" vs "ROCKWOOL"). An exact-string lookup on manufacturer_ref
-    # would miss the existing row and then collide with products.slug's
-    # unique constraint on insert, since slugify() normalizes both to the
-    # same slug. This must dedupe to one product either way.
+    # ("Rockwool" vs "ROCKWOOL"). manufacturer_ref is no longer part of the
+    # identity slug at all (see the next test for why -- presence/absence
+    # drift, not just casing, fragments products), so this must still
+    # dedupe to one product on name alone, and the later, real
+    # manufacturer_ref value must still end up on the row.
     org_id, brand_id = _make_org_brand_product(conn, org_slug="delta")
     with conn.cursor() as cur:
         cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
@@ -239,9 +240,68 @@ def test_persist_upsert_product_dedupes_by_slug_despite_manufacturer_ref_casing_
 
     assert stats.products_created_or_updated == 1
     with conn.cursor() as cur:
-        cur.execute("select id from products where slug = 'roxul-safe-rockwool'")
+        cur.execute("select id, manufacturer_ref from products where slug = 'roxul-safe'")
         rows = cur.fetchall()
     assert len(rows) == 1
+    assert rows[0]["manufacturer_ref"] == "Rockwool"
+
+
+def test_persist_upsert_product_dedupes_by_name_despite_manufacturer_ref_presence_drift(conn):
+    # Found for real 2026-08-14 auditing the HeartFelt line: two different
+    # source documents both say "HeartFelt® Origami" (same name, verified
+    # against the PDFs), but only one extraction call happened to emit a
+    # manufacturer_ref -- the other left it None. Under the old (name,
+    # manufacturer_ref) slug key this silently created TWO product rows,
+    # each holding only part of the real ground truth (claims split
+    # 38/5), with no error anywhere. Must dedupe to one product regardless
+    # of which call states a manufacturer_ref, and a manufacturer_ref
+    # supplied later must still get backfilled onto the existing row.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="epsilon")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-epsilon"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(manufacturer_ref):
+        return [{
+            "name": "HeartFelt Origami", "manufacturer_ref": manufacturer_ref,
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "1" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted(None),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "2" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("Hunter Douglas Europe B.V."),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    assert stats.products_created_or_updated == 1
+    with conn.cursor() as cur:
+        cur.execute("select id, manufacturer_ref from products where slug = 'heartfelt-origami'")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0]["manufacturer_ref"] == "Hunter Douglas Europe B.V."
 
 
 def test_persist_variants_get_distinct_current_claims_per_variant(conn):
