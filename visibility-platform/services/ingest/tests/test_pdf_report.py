@@ -264,11 +264,16 @@ def test_gather_report_data_and_render_pdf_end_to_end(tmp_path, conn):
         full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
     for expected in (
-        "AI Visibility Audit: Acme Systeemplafonds", "Method", "Scores", "Worst findings",
-        "Competitive picture", "Documentation gaps", "Crawlability", "Page-visibility gaps",
-        "Remediation", "GPTBot", "Rival Corp", "likely_confusion",
+        "AI Visibility Audit: Acme Systeemplafonds", "Method", "Hoe dit rapport is opgebouwd",
+        "Scores", "Critical notes", "Competitive picture", "Documentation gaps", "Crawlability",
+        "Page-visibility gaps", "Remediation", "Appendix", "GPTBot", "Rival Corp", "likely_confusion",
     ):
         assert expected in full_text, f"expected {expected!r} in rendered PDF text"
+
+    # Critical notes must always carry advisory content, and the appendix
+    # must reproduce the actual raw answer text, not just extracted claims.
+    assert "Advies:" in full_text
+    assert "Acme Systeemplafonds haalt 0.90 op deze spec." in full_text
 
 
 def test_unknown_run_id_raises_value_error(conn):

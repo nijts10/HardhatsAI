@@ -535,6 +535,28 @@ def get_visibility_answers_for_run(conn: psycopg.Connection, run_id: str) -> lis
         return cur.fetchall()
 
 
+def get_prompts_and_answers_for_run(conn: psycopg.Connection, run_id: str) -> list[dict]:
+    """Every prompt this run actually asked, with every replicate's raw
+    answer text -- for the PDF report's appendix. Full auditability: a
+    client reading the report must be able to see exactly what was asked
+    and exactly what came back, not just the extracted claims derived
+    from it. Ordered by intent then prompt then replicate so the appendix
+    reads as one coherent block per prompt, not scattered by answer id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select p.intent::text as intent, p.text as prompt_text, p.id as prompt_id,
+                   va.replicate_index, va.response_text, va.resolved_model_version
+              from visibility_answers va
+              join prompts p on p.id = va.prompt_id
+             where va.run_id = %s
+             order by p.intent, p.text, va.replicate_index
+            """,
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
 def has_answer_claims(conn: psycopg.Connection, answer_id: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("select 1 from answer_claims where answer_id = %s limit 1", (answer_id,))
