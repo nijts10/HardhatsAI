@@ -70,17 +70,76 @@ def get_category_ancestor_codes(conn: psycopg.Connection, category_id: Optional[
 def create_product(
     conn: psycopg.Connection, *, brand_id: str, category_id: Optional[str],
     name: str, slug: str, manufacturer_ref: Optional[str] = None,
+    product_line_id: Optional[str] = None,
 ) -> str:
     with conn.cursor() as cur:
         cur.execute(
             """
-            insert into products (brand_id, category_id, name, slug, manufacturer_ref)
-            values (%s, %s, %s, %s, %s)
+            insert into products (brand_id, category_id, name, slug, manufacturer_ref, product_line_id)
+            values (%s, %s, %s, %s, %s, %s)
             returning id
             """,
-            (brand_id, category_id, name, slug, manufacturer_ref),
+            (brand_id, category_id, name, slug, manufacturer_ref, product_line_id),
         )
         return cur.fetchone()["id"]
+
+
+def get_product_line_by_slug(conn: psycopg.Connection, brand_id: str, slug: str) -> Optional[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select * from product_lines where brand_id = %s and slug = %s",
+            (brand_id, slug),
+        )
+        return cur.fetchone()
+
+
+def create_product_line(conn: psycopg.Connection, *, brand_id: str, name: str, slug: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into product_lines (brand_id, name, slug) values (%s, %s, %s) returning id",
+            (brand_id, name, slug),
+        )
+        return cur.fetchone()["id"]
+
+
+def set_product_line(conn: psycopg.Connection, product_id: str, product_line_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "update products set product_line_id = %s where id = %s",
+            (product_line_id, product_id),
+        )
+
+
+def find_similar_products_in_line(
+    conn: psycopg.Connection, *, product_line_id: str, name: str, exclude_product_id: Optional[str] = None,
+    threshold: float = 0.35,
+) -> list[dict]:
+    """pg_trgm similarity of `name` against every OTHER product already in
+    this same product_line -- same technique claims_diff.py already uses to
+    fuzzy-resolve an AI answer's product_name against the catalog (Part 4).
+    Used as a warn-only signal in persistence.py when a brand-new product is
+    about to be created: a same-line product with a similar-but-not-
+    identical name is exactly the pattern that has silently fragmented one
+    real product into two rows three separate times (2026-08-14, 08-19,
+    09-07). Never auto-merges -- vocabulary/identity decisions stay
+    human-curated (same principle as spec_attributes), this only surfaces
+    the candidate for review via PersistStats.possible_duplicate_products."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select id, name, similarity(name, %(name)s) as score
+              from products
+             where product_line_id = %(product_line_id)s
+               and id is distinct from %(exclude_product_id)s
+               and similarity(name, %(name)s) >= %(threshold)s
+             order by score desc
+            """,
+            {
+                "name": name, "product_line_id": product_line_id,
+                "exclude_product_id": exclude_product_id, "threshold": threshold,
+            },
+        )
+        return cur.fetchall()
 
 
 def get_variant_by_slug(conn: psycopg.Connection, product_id: str, slug: str) -> Optional[dict]:

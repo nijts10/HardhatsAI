@@ -108,6 +108,7 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
             "unmapped_findings_queued": stats.unmapped_findings_queued,
             "unmapped_findings_rejected": stats.unmapped_findings_rejected,
             "rejections": stats.rejections,
+            "possible_duplicate_products": stats.possible_duplicate_products,
         },
     )
 
@@ -118,4 +119,5 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
         "claims_inserted": stats.claims_inserted,
         "claims_rejected": stats.claims_rejected,
         "unmapped_findings_queued": stats.unmapped_findings_queued,
+        "possible_duplicate_products": stats.possible_duplicate_products,
     }

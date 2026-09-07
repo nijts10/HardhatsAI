@@ -23,7 +23,15 @@ PARSER_VERSION = "2"
 # with presence 'stated' -- correctly rejected by the digit-in-snippet
 # check (0.85 isn't either bound), but the underlying fact was then lost
 # entirely instead of captured as the range it actually is.
-PROMPT_VERSION = "2"
+# Bumped 2026-09-07: added rule 9 (product_line) and the schema field of
+# the same name -- brand -> line -> product -> product type -> spec was
+# always the intended hierarchy but "line" had no place to go, so it got
+# folded into the product name string itself ("HeartFelt Ceiling System"),
+# which is exactly why the same real product keeps getting a fresh row
+# whenever a document phrases its name slightly differently. This alone
+# doesn't fix that fragmentation, but persistence.py now uses it to warn
+# on a same-line near-duplicate name instead of silently creating one.
+PROMPT_VERSION = "3"
 
 _TOOL_NAME = "emit_products"
 
@@ -93,6 +101,7 @@ _TOOL = {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
+                        "product_line": {"type": ["string", "null"]},
                         "manufacturer_ref": {"type": ["string", "null"]},
                         "claims": {"type": "array", "items": _CLAIM_SCHEMA},
                         "certifications": {"type": "array", "items": _CERTIFICATION_SCHEMA},
@@ -214,6 +223,15 @@ Rules:
    rejected). European-style decimal commas (0,90) are the actual
    verbatim text in some documents — copy the snippet exactly as
    printed, comma or point, whichever the source uses.
+9. If this product belongs to a named sub-brand or product line (e.g.
+   "HeartFelt", "PareauLux", "Luxalon" for Hunter Douglas), set
+   product_line to that line's name. This is IN ADDITION to name, not a
+   replacement for any part of it — name must still be the product's full
+   name exactly as this document states it, the same as every other
+   field in this schema (e.g. name "HeartFelt® Ceiling System",
+   product_line "HeartFelt" — never shorten name to just "Ceiling
+   System"). If the document doesn't indicate the product belongs to any
+   named line, set product_line to null — do not guess one.
 
 Document chunks:
 

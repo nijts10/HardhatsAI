@@ -32,6 +32,12 @@ class PersistStats:
     unmapped_findings_queued: int = 0
     unmapped_findings_rejected: int = 0
     rejections: list[str] = field(default_factory=list)
+    # Warn-only: a brand-new product name that's suspiciously similar (pg_trgm)
+    # to an existing product already in the same product_line. Never blocks
+    # creation or auto-merges -- see db.find_similar_products_in_line's
+    # docstring for why. Surfaced in extraction_runs.stats so it's visible
+    # in the CLI output instead of requiring forensic SQL after the fact.
+    possible_duplicate_products: list[dict] = field(default_factory=list)
 
 
 def _chunk_id_for_page(chunks: list[dict], page_number: int | None) -> str | None:
@@ -50,8 +56,24 @@ def _values_equal(existing: dict, normalized: dict) -> bool:
     return True
 
 
+def _upsert_product_line(conn: psycopg.Connection, *, brand_id: str, name: str | None) -> str | None:
+    """Resolve (or create) the product_lines row for this brand -- the
+    missing layer in brand -> line -> product -> product type -> spec (+
+    data). None in, None out: not every document names a sub-line, and
+    absence must stay "not yet known", never a guessed value (same
+    three-state philosophy as everywhere else in this project)."""
+    if not name:
+        return None
+    slug = slugify(name)
+    existing = db.get_product_line_by_slug(conn, brand_id, slug)
+    if existing:
+        return existing["id"]
+    return db.create_product_line(conn, brand_id=brand_id, name=name, slug=slug)
+
+
 def _upsert_product(conn: psycopg.Connection, *, brand_id: str, category_id: str | None,
-                     name: str, manufacturer_ref: str | None) -> str:
+                     name: str, manufacturer_ref: str | None, product_line_name: str | None,
+                     stats: PersistStats) -> str:
     # Look up by slug of NAME ONLY -- manufacturer_ref must never be part of
     # the identity key. Originally it was (see git history), to survive
     # casing/whitespace drift in manufacturer_ref between extraction calls
@@ -68,8 +90,10 @@ def _upsert_product(conn: psycopg.Connection, *, brand_id: str, category_id: str
     # data, not part of what makes two mentions "the same product"; only
     # name (scoped to this brand's extraction) should decide that.
     slug = slugify(name)
+    product_line_id = _upsert_product_line(conn, brand_id=brand_id, name=product_line_name)
+
     with conn.cursor() as cur:
-        cur.execute("select id, manufacturer_ref from products where slug = %s", (slug,))
+        cur.execute("select id, manufacturer_ref, product_line_id from products where slug = %s", (slug,))
         existing = cur.fetchone()
         if existing:
             # Backfill manufacturer_ref if a later call supplies one and the
@@ -80,11 +104,33 @@ def _upsert_product(conn: psycopg.Connection, *, brand_id: str, category_id: str
                 "update products set name = %s, manufacturer_ref = %s where id = %s",
                 (name, new_ref, existing["id"]),
             )
+            # Same backfill rule for product_line_id -- fill it in if this
+            # call identified one and the existing row doesn't have one yet.
+            if existing["product_line_id"] is None and product_line_id is not None:
+                db.set_product_line(conn, existing["id"], product_line_id)
             return existing["id"]
+
+    # No exact-name match. If this product belongs to a known line, warn
+    # (never block/auto-merge) when an existing product in that SAME line
+    # has a suspiciously similar name -- this exact pattern (a genuinely
+    # different name string for the same real product) has silently
+    # fragmented one product into two rows three times now (2026-08-14,
+    # 08-19, 09-07), each time only caught by a human diffing the catalog
+    # after the fact. Surfacing it here doesn't fix the fragmentation, but
+    # it means it no longer requires forensic SQL to notice.
+    if product_line_id is not None:
+        candidates = db.find_similar_products_in_line(
+            conn, product_line_id=product_line_id, name=name,
+        )
+        for c in candidates:
+            stats.possible_duplicate_products.append({
+                "new_name": name, "existing_name": c["name"],
+                "existing_id": str(c["id"]), "similarity": round(c["score"], 2),
+            })
 
     return db.create_product(
         conn, brand_id=brand_id, category_id=category_id, name=name,
-        slug=slug, manufacturer_ref=manufacturer_ref,
+        slug=slug, manufacturer_ref=manufacturer_ref, product_line_id=product_line_id,
     )
 
 
@@ -168,6 +214,7 @@ def persist_extracted_products(
         product_id = _upsert_product(
             conn, brand_id=brand_id, category_id=category_id,
             name=product["name"], manufacturer_ref=product.get("manufacturer_ref"),
+            product_line_name=product.get("product_line"), stats=stats,
         )
         stats.products_created_or_updated += 1
 

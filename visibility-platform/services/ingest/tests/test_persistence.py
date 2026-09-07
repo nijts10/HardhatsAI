@@ -304,6 +304,199 @@ def test_persist_upsert_product_dedupes_by_name_despite_manufacturer_ref_presenc
     assert rows[0]["manufacturer_ref"] == "Hunter Douglas Europe B.V."
 
 
+def test_persist_creates_product_line_and_links_product(conn):
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="zeta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-zeta"))
+        placeholder_product_id = cur.fetchone()["id"]
+    _, version_id = _make_document(conn, org_id, placeholder_product_id, "3" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id,))
+        run_id = cur.fetchone()["id"]
+
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id,
+        extraction_run_id=run_id,
+        extracted_products=[{
+            "name": "HeartFelt Ceiling System", "product_line": "HeartFelt",
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }],
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    with conn.cursor() as cur:
+        cur.execute("select id, product_line_id from products where slug = 'heartfelt-ceiling-system'")
+        product = cur.fetchone()
+        assert product["product_line_id"] is not None
+        cur.execute("select brand_id, name, slug from product_lines where id = %s", (product["product_line_id"],))
+        line = cur.fetchone()
+    assert line["brand_id"] == brand_id
+    assert line["name"] == "HeartFelt"
+    assert line["slug"] == "heartfelt"
+
+
+def test_persist_backfills_product_line_id_on_existing_product(conn):
+    # Same backfill precedent as manufacturer_ref: a product created before
+    # its line was ever identified (or by an extraction call that didn't
+    # supply one) must pick up product_line_id the first time a later call
+    # does supply one, without needing a new row.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="eta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-eta"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(product_line):
+        return [{
+            "name": "Origami", "product_line": product_line,
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "4" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted(None),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+    with conn.cursor() as cur:
+        cur.execute("select product_line_id from products where slug = 'origami'")
+        assert cur.fetchone()["product_line_id"] is None
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "5" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("HeartFelt"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    assert stats.products_created_or_updated == 1
+    with conn.cursor() as cur:
+        cur.execute("select id, name, slug from products where slug = 'origami'")
+        rows = cur.fetchall()
+        cur.execute("""select p.product_line_id, pl.name as line_name from products p
+                       join product_lines pl on pl.id = p.product_line_id where p.slug = 'origami'""")
+        linked = cur.fetchone()
+    assert len(rows) == 1  # still one product row, not a second one
+    assert linked["line_name"] == "HeartFelt"
+
+
+def test_persist_warns_on_similar_name_within_same_product_line(conn):
+    # This is the exact failure class that has fragmented one real product
+    # into two rows three times in production (2026-08-14, 08-19, 09-07):
+    # a genuinely different name string for the same real product, inside
+    # the same line. Must NOT block creation or auto-merge -- only surface
+    # the candidate so a human/reviewer can catch it, same principle as
+    # spec_attributes staying human-curated.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="theta")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-theta"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(name):
+        return [{
+            "name": name, "product_line": "HeartFelt",
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "6" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted("HeartFelt Wall System"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "7" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("HeartFelt Wall"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    # Both rows exist -- this is a warning, not an auto-merge.
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from products where slug in ('heartfelt-wall-system', 'heartfelt-wall')")
+        assert cur.fetchone()["n"] == 2
+
+    assert len(stats.possible_duplicate_products) == 1
+    warning = stats.possible_duplicate_products[0]
+    assert warning["new_name"] == "HeartFelt Wall"
+    assert warning["existing_name"] == "HeartFelt Wall System"
+
+
+def test_persist_no_warning_across_different_product_lines(conn):
+    # A similar name is only suspicious WITHIN the same line -- two
+    # unrelated products in different lines that happen to share a word
+    # ("Linear") must not trigger a false-positive warning.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="iota")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-iota"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(name, product_line):
+        return [{
+            "name": name, "product_line": product_line,
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "8" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted("HeartFelt Linear", "HeartFelt"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "9" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("Luxalon Linear Ceiling 84B", "Luxalon"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    assert stats.possible_duplicate_products == []
+
+
 def test_persist_variants_get_distinct_current_claims_per_variant(conn):
     # The whole point of fix 6: two variants of one product can carry
     # DIFFERENT values for the same spec (e.g. sound reduction by
