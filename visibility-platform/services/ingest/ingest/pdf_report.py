@@ -252,6 +252,33 @@ class CriticalNote:
 
 
 @dataclass
+class CitationSourceSummary:
+    """Where the AI's web-search citations actually pointed, for one run --
+    NOT computed by gather_report_data (resolving each citation means
+    following ~1 HTTP redirect per unique URL, which does not belong in
+    the normal report-generation path). Built separately (see
+    add_citation_source_analysis.py) and attached to ReportData
+    afterward. Optional and None by default so every other report keeps
+    generating at its normal speed; only a report someone has explicitly
+    run this analysis for carries it."""
+    total_citations: int
+    own_domain_citations: int
+    top_domains: list[tuple[str, int, bool]]  # (domain, count, is_own_domain)
+    # Per documentation-gap claim: which bucket its citations fell into.
+    # "own_site" means a citation for that specific claim resolved to the
+    # brand's own domain -- worth manually spot-checking (as this report
+    # did) before assuming the fact is really an ingestion gap rather than
+    # a genuine documentation gap, since an AI's citation list for one
+    # extracted claim is attached at the whole-answer level, not
+    # necessarily sentence-precise.
+    gap_sources: list[dict]  # {product_name, spec_name, source_quote, bucket}
+
+    @property
+    def own_domain_share(self) -> float:
+        return self.own_domain_citations / self.total_citations if self.total_citations else 0.0
+
+
+@dataclass
 class ReportData:
     brand_name: str
     run: dict
@@ -267,6 +294,7 @@ class ReportData:
     remediation: list[RemediationItem] = field(default_factory=list)
     critical_notes: list[CriticalNote] = field(default_factory=list)
     problem_statement: str = ""
+    citation_source_summary: Optional[CitationSourceSummary] = None
 
 
 def _format_value(prefix: str, row: dict) -> str:
@@ -808,6 +836,46 @@ def render_pdf(data: ReportData, output_path: str) -> None:
                 block.append(Paragraph(f"Browsed source: {citations[0]}", ss["Small"]))
             story.append(KeepTogether(block))
             story.append(Spacer(1, 3 * mm))
+
+    story.append(PageBreak())
+
+    if data.citation_source_summary:
+        cs = data.citation_source_summary
+        story.append(Paragraph("Where the AI Actually Gets Its Information", ss["H2"]))
+        story.append(Paragraph(
+            "How this was determined: every citation URL the AI's web search actually returned across this "
+            "run's answers was followed to its real destination (these come back as opaque Google redirect "
+            "links, not the source domain itself) and grouped by domain.", ss["Small"],
+        ))
+        story.append(Paragraph(
+            f"<b>Of {cs.total_citations} citations used across this run's answers, only {cs.own_domain_citations} "
+            f"({cs.own_domain_share:.1%}) point to {data.brand_name}'s own website.</b> The rest come from "
+            f"competitors' own sites and third-party industry portals, blogs, and comparison sites -- meaning "
+            f"{data.brand_name} does not control most of what the AI is actually drawing on when it talks "
+            f"about this market.", ss["Normal"],
+        ))
+        story.append(Spacer(1, 3 * mm))
+        rows = [["Domain", "Citations", "Whose site"]]
+        for domain, count, is_own in cs.top_domains[:20]:
+            rows.append([_cell(domain, ss["Cell"]), str(count), "OWN" if is_own else ""])
+        story.append(_table(rows, col_widths=[90 * mm, 30 * mm, 40 * mm]))
+
+        if cs.gap_sources:
+            story.append(Spacer(1, 4 * mm))
+            own_site = [g for g in cs.gap_sources if g["bucket"] == "own_site"]
+            third_party = [g for g in cs.gap_sources if g["bucket"] == "third_party"]
+            no_citation = [g for g in cs.gap_sources if g["bucket"] == "no_citation"]
+            story.append(Paragraph(
+                f"Looking specifically at this run's {len(cs.gap_sources)} documentation gaps (Section 6, "
+                f"below): {len(own_site)} actually cite a page on {data.brand_name}'s own website -- meaning "
+                f"the fact may genuinely be published, correctly, and this audit's documentation pipeline "
+                f"(which reads uploaded manufacturer PDFs, not the live website) simply never captured it. "
+                f"We spot-checked one of these by fetching the cited page directly: the claim was confirmed "
+                f"accurate and present as readable text. {len(third_party)} cite only competitor or "
+                f"third-party sources -- {data.brand_name} genuinely does not control this part of the "
+                f"story. {len(no_citation)} came with no citation at all (the AI answered from its own "
+                f"training knowledge, ungrounded).", ss["Normal"],
+            ))
 
     story.append(PageBreak())
 
