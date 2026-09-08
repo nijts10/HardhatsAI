@@ -264,15 +264,17 @@ def test_gather_report_data_and_render_pdf_end_to_end(tmp_path, conn):
         full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
     for expected in (
-        "AI Visibility Audit: Acme Systeemplafonds", "Method", "Hoe dit rapport is opgebouwd",
-        "Scores", "Critical notes", "Competitive picture", "Documentation gaps", "Crawlability",
-        "Page-visibility gaps", "Remediation", "Appendix", "GPTBot", "Rival Corp", "likely_confusion",
+        "AI Visibility Audit: Acme Systeemplafonds", "1. The problem", "2. Introduction",
+        "3. About HardhatsAI", "4. Methodology", "5. The research", "6. Conclusions", "Scores",
+        "Critical Notes", "Competitive Picture", "Documentation Gaps", "Crawlability",
+        "Page-Visibility Gaps", "Remediation", "7. Appendix", "GPTBot", "Rival Corp", "likely_confusion",
+        "Presence Rate", "Share of Voice", "Spec Accuracy", "Data Completeness",
     ):
         assert expected in full_text, f"expected {expected!r} in rendered PDF text"
 
     # Critical notes must always carry advisory content, and the appendix
     # must reproduce the actual raw answer text, not just extracted claims.
-    assert "Advies:" in full_text
+    assert "Advice:" in full_text
     assert "Acme Systeemplafonds haalt 0.90 op deze spec." in full_text
 
 

@@ -64,47 +64,183 @@ class RemediationItem:
 
 INTENT_GLOSSARY: dict[str, dict[str, str]] = {
     "spec_constrained": {
-        "label": "Eis-gedreven",
-        "definition": "De vraag noemt concrete, meetbare eisen (waarden, normen, afmetingen) en vraagt om een "
-                       "product dat daaraan voldoet.",
+        "label": "Requirement-driven",
+        "definition": "The question states concrete, measurable requirements (values, standards, dimensions) "
+                       "and asks for a product that meets them -- the way a specifier searches once they "
+                       "already know what they need.",
         "example": "Systeemplafond met αw minimaal 0,90 en brandklasse A2-s1,d0",
     },
     "application_driven": {
-        "label": "Toepassing-gedreven",
-        "definition": "De vraag beschrijft een ruimte of gebruikssituatie (klaslokaal, zwembad, operatiekamer) "
-                       "zonder concrete specs te noemen, en vraagt wat daarvoor geschikt is.",
+        "label": "Application-driven",
+        "definition": "The question describes a room or use case (classroom, swimming pool, operating theatre) "
+                       "without stating any concrete specs, and asks what would be suitable there.",
         "example": "Welk systeemplafond is geschikt voor een klaslokaal met veel nagalm?",
     },
     "comparative": {
-        "label": "Vergelijkend",
-        "definition": "De vraag vergelijkt expliciet twee of meer merken/producten (vaak inclusief concurrenten) "
-                       "met elkaar.",
+        "label": "Comparative",
+        "definition": "The question explicitly compares two or more brands/products with each other, often "
+                       "including named competitors.",
         "example": "Rockfon of Ecophon voor een schoolgebouw, wat is het verschil?",
     },
     "compliance": {
-        "label": "Regelgeving-gedreven",
-        "definition": "De vraag gaat over wettelijke eisen, bouwbesluit- of normeringsverplichtingen, niet over "
-                       "een specifiek product.",
+        "label": "Regulation-driven",
+        "definition": "The question is about legal requirements, building-code or standard obligations, not "
+                       "about a specific product.",
         "example": "Welke eisen stelt het Bouwbesluit aan geluidsabsorptie in een klaslokaal?",
     },
     "sustainability": {
-        "label": "Duurzaamheid-gedreven",
-        "definition": "De vraag draait om milieu-impact: MKI, GWP, recyclebaarheid, EPD's, Cradle to Cradle.",
+        "label": "Sustainability-driven",
+        "definition": "The question is about environmental impact: MKI, GWP, recyclability, EPDs, Cradle to "
+                       "Cradle certification.",
         "example": "Systeemplafond met de laagste MKI-waarde",
     },
     "brand_direct": {
-        "label": "Merk-specifiek",
-        "definition": "De vraag noemt het merk zelf letterlijk. Dit is de enige categorie waarin \"gevonden "
-                       "worden\" triviaal is (de merknaam staat al in de vraag) — hier is spec accuracy de "
-                       "metric die er echt toe doet, niet presence rate.",
+        "label": "Brand-specific",
+        "definition": "The question names the brand itself. This is the only category where \"being found\" "
+                       "is trivial (the brand name is already in the question) -- here, spec accuracy is the "
+                       "metric that actually matters, not presence rate.",
         "example": "Welke akoestische plafonds levert Hunter Douglas?",
     },
     "problem_driven": {
-        "label": "Probleem-gedreven",
-        "definition": "De vraag beschrijft een klacht of storing aan een bestaand plafond en vraagt om een "
-                       "alternatief.",
+        "label": "Problem-driven",
+        "definition": "The question describes a complaint or failure with an existing ceiling and asks for an "
+                       "alternative.",
         "example": "Mijn systeemplafond hangt door bij hoge luchtvochtigheid, welk alternatief?",
     },
+}
+
+# One English rationale per prompt, keyed by the prompt's exact (Dutch)
+# text as stored in `prompts`. The prompts themselves stay in their
+# original language -- they're real source data a client must be able to
+# match verbatim against the appendix and the live prompts table, not
+# something to translate. Written by hand against the real 50-prompt set
+# (migration 0015), not auto-generated from a template, so each one
+# actually reflects why that specific question is in the set.
+PROMPT_RATIONALES: dict[str, str] = {
+    "Akoestisch plafond voor een callcenter met veel werkplekken":
+        "Tests whether the AI can turn a busy open-plan use case into an acoustic recommendation without "
+        "the user stating any spec numbers.",
+    "Akoestisch plafond voor een open kantoortuin met werkplekken":
+        "The same use-case pattern applied to open-plan offices, one of the most common real-world "
+        "specifier queries.",
+    "Plafond voor een serverruimte, brandwerend en onderhoudsvriendelijk":
+        "Tests whether the AI can combine two different requirements (fire safety and maintainability) "
+        "implied by a single room type.",
+    "Plafond voor een zwembad, bestand tegen hoge luchtvochtigheid":
+        "Tests a recommendation for a demanding, humid environment where material choice matters most.",
+    "Plafondsysteem voor een sporthal, balbestendig en geluidsabsorberend":
+        "Tests a niche but real specifier need (impact resistance) alongside acoustics.",
+    "Plafondsysteem voor een treinstation, hoog en goed bereikbaar voor onderhoud":
+        "Tests a recommendation for large-span public infrastructure, a different product class than "
+        "office ceilings.",
+    "Systeemplafond voor een operatiekamer, reinigbaar en hygiënisch":
+        "Tests a healthcare-grade hygiene requirement, a high-value specification niche.",
+    "Systeemplafond voor een parkeergarage, corrosiebestendig":
+        "Tests an unglamorous but common application where the wrong material choice fails quickly.",
+    "Welk plafond gebruik je in een keuken van een restaurant?":
+        "Tests a casual, non-technical phrasing of a hygiene/moisture requirement, closer to how a "
+        "non-specialist might actually ask.",
+    "Welk plafond past bij een theaterzaal met strenge akoestische eisen?":
+        "Tests a high-acoustic-performance application without giving exact numbers.",
+    "Welk systeemplafond is geschikt voor een klaslokaal met veel nagalm?":
+        "The most common real-world education-sector query, and the brief's own flagship example.",
+    "Welk systeemplafond werkt in combinatie met klimaatplafonds?":
+        "Tests a technical integration question (compatibility with another building system), not just a "
+        "standalone product pick.",
+    "Levert Hunter Douglas ook houten plafondsystemen?":
+        "Tests whether the AI knows the full breadth of Hunter Douglas's own product range, not just its "
+        "best-known line.",
+    "Welke akoestische plafonds levert Hunter Douglas?":
+        "The most direct possible test: the brand name is already in the question, so any gap here is the "
+        "hardest to explain away.",
+    "Welke systeemplafonds heeft Rockfon in het assortiment?":
+        "A control prompt aimed at a named competitor, included to see whether Hunter Douglas gets "
+        "volunteered even when the question is about someone else.",
+    "Knauf AMF versus Armstrong, wat zijn de akoestische verschillen?":
+        "A competitor-vs-competitor control prompt; tests whether Hunter Douglas is ever volunteered as a "
+        "third option even when not named.",
+    "Metalen plafond versus minerale wol plafond, voor- en nadelen":
+        "Tests a category-level (not brand-level) comparison, the kind of question that precedes a brand "
+        "search.",
+    "Open of gesloten systeemplafond, wat is akoestisch gunstiger?":
+        "Tests a fundamental design decision that determines which product category gets considered at all.",
+    "Rockfon of Ecophon voor een schoolgebouw, wat is het verschil?":
+        "A named two-competitor comparison; again tests whether Hunter Douglas gets mentioned as an "
+        "alternative.",
+    "Saint-Gobain Ecophon versus Rockfon, verschil in brandklasse?":
+        "The same pattern, narrowed to one spec (fire class), testing depth of comparison rather than just "
+        "brand recall.",
+    "Verschil tussen Hunter Douglas HeartFelt en een standaard baffleplafond":
+        "The one comparative prompt that directly names Hunter Douglas; tests spec accuracy on home turf.",
+    "Vilt plafond versus minerale wol, wat scoort beter op duurzaamheid?":
+        "Tests a material-category comparison on sustainability, using HeartFelt's own core material.",
+    "Wat is beter voor akoestiek: geperforeerd staal of glaswolplaat?":
+        "Tests a technical material comparison one level below brand, common early in a specification "
+        "process.",
+    "Frisse Scholen klasse A, welke plafondeisen horen daarbij?":
+        "Tests knowledge of a specific Dutch schools ventilation/acoustics standard, a real requirement in "
+        "education projects.",
+    "Frisse Scholen klasse B akoestiek, welk plafond haalt dat?":
+        "The same standard one class down, testing whether the AI differentiates between compliance tiers.",
+    "Is een DoP verplicht voor een systeemplafond onder CPR 305/2011?":
+        "Tests regulatory/compliance knowledge (the Construction Products Regulation) rather than a product "
+        "recommendation.",
+    "Moet een systeemplafond CE-gemarkeerd zijn volgens EN 13964?":
+        "Tests knowledge of the specific product standard for suspended ceilings.",
+    "Wat zegt het Bouwbesluit over brandwerendheid van plafonds in vluchtwegen?":
+        "Tests knowledge of Dutch building-code fire-safety requirements for escape routes, a high-stakes "
+        "compliance topic.",
+    "Welke brandklasse is vereist voor een plafond in een vluchtroute?":
+        "A narrower, spec-level follow-up to the escape-route fire-safety question.",
+    "Welke eisen stelt het Bouwbesluit aan geluidsabsorptie in een klaslokaal?":
+        "The brief's own flagship compliance example.",
+    "Welke norm geldt voor geluidsabsorptie in plafonds, EN ISO 11654?":
+        "Tests knowledge of the underlying acoustic testing standard itself, not just a building code.",
+    "Mijn systeemplafond hangt door bij hoge luchtvochtigheid, welk alternatief?":
+        "The brief's own flagship problem-driven example; tests whether the AI recommends an alternative "
+        "brand when a customer already has a failing product.",
+    "Nagalm in kantoortuin is te hoog, welk plafond lost dit op?":
+        "Tests a retrofit/complaint-driven scenario, common when a completed building underperforms "
+        "acoustically.",
+    "Akoestisch plafond met Dnf,w van minimaal 40 dB voor kantoorscheiding":
+        "Tests matching a precise sound-insulation requirement between rooms, distinct from absorption.",
+    "Baffleplafond met absorptieklasse B en gewicht max 3 kg/m²":
+        "Tests a two-constraint match (acoustic class and weight) specific to baffle-type ceilings, "
+        "HeartFelt's own product type.",
+    "Demontabel metalen plafond, module 600x600, gewicht onder 5 kg/m²":
+        "Tests matching a standard module size plus a weight ceiling, a very common architect shorthand.",
+    "Geperforeerd metalen plafond, perforatiegraad rond 16%, met akoestisch vlies":
+        "Tests a precise, product-catalogue-style spec combination.",
+    "Gipsplafond met corrosieweerstandsklasse C voor vochtige ruimte":
+        "Tests a material plus corrosion-class requirement outside Hunter Douglas's core felt/metal lines.",
+    "Houten roosterplafond, open profiel, lichtreflectie minimaal 70%":
+        "Tests a wood-ceiling requirement, one of Hunter Douglas's own product lines.",
+    "Metalen lamellenplafond met perforatiegraad 20% en Rw 35 dB":
+        "Tests the Luxalon Linear Metal product line's own real spec profile.",
+    "Plafondsysteem met lichtreflectie boven 85% en absorptieklasse A":
+        "Tests the combination of light reflectance and top acoustic class, both premium-tier requirements.",
+    "Plafondsysteem met NRC 0,75 en modulemaat 1200x600":
+        "Tests the North-American-style NRC metric alongside a specific module size.",
+    "Systeemplafond brandklasse B-s2,d0, geschikt tot vochtklasse 90%":
+        "Tests a fire class plus humidity tolerance combination.",
+    "Systeemplafond met EPD beschikbaar en GWP onder 5 kg CO2-eq/m²":
+        "Tests whether the AI can match a strict, numeric sustainability requirement, not just a general "
+        "\"sustainable\" claim.",
+    "Systeemplafond met αw minimaal 0,90 en brandklasse A2-s1,d0":
+        "The brief's own flagship spec-constrained example, combining top-tier acoustics with a strict "
+        "fire class.",
+    "Demontabel plafond met hoog aandeel gerecycled materiaal":
+        "Tests recycled-content knowledge combined with a demountability requirement.",
+    "Systeemplafond met de laagste MKI-waarde":
+        "Tests the Dutch environmental-cost indicator (MKI), used directly in Dutch tender scoring.",
+    "Systeemplafond met hoogste percentage gerecycled materiaal":
+        "Tests a superlative sustainability claim, the kind of question that rewards a documented, "
+        "citable number.",
+    "Welk plafond scoort goed voor BREEAM Excellent?":
+        "Tests whether the AI connects a product to a specific building-certification tier.",
+    "Welk plafondmerk publiceert een EPD volgens EN 15804?":
+        "Tests whether the AI knows which brands have a compliant Environmental Product Declaration, a "
+        "frequent tender requirement.",
 }
 
 
@@ -130,6 +266,7 @@ class ReportData:
     prompts_and_answers: list[dict]
     remediation: list[RemediationItem] = field(default_factory=list)
     critical_notes: list[CriticalNote] = field(default_factory=list)
+    problem_statement: str = ""
 
 
 def _format_value(prefix: str, row: dict) -> str:
@@ -274,65 +411,97 @@ def _build_critical_notes(
 
     if worst_findings:
         for finding in worst_findings:
-            verdict_label = "onjuiste claim" if finding["verdict"] == "incorrect" else "mogelijk verwarde claim"
+            verdict_label = "incorrect claim" if finding["verdict"] == "incorrect" else "likely confused claim"
             advice = (
-                f"Controleer of “{finding['spec_name_nl']}” voor {finding['product_name']} "
-                f"correct en actueel gedocumenteerd is, en overweeg of de gebruikte bewoording elders online "
-                f"(reviews, distributeurs, oudere versies van eigen materiaal) tot verwarring kan leiden."
+                f"Check whether “{finding['spec_name_nl']}” for {finding['product_name']} is "
+                f"documented correctly and up to date, and consider whether wording used elsewhere online "
+                f"(reviews, distributors, older versions of your own material) could be causing the confusion."
             )
             notes.append(CriticalNote(
                 heading=f"{finding['product_name']} — {finding['spec_name_nl']} ({verdict_label})",
-                body=f"AI zei: “{finding['source_quote']}”. Dit wijkt af van de eigen, geciteerde "
+                body=f"AI said: “{finding['source_quote']}”. This diverges from your own, cited "
                      f"ground truth.",
                 advice=advice,
             ))
     else:
-        checkable_note = (
-            f"Geen enkele claim over {brand_name} is deze run als aantoonbaar onjuist gemarkeerd."
-        )
+        checkable_note = f"No claim about {brand_name} was flagged as demonstrably incorrect this run."
         if own_mentions:
             checkable_note += (
-                f" Belangrijk om dit correct te lezen: van de {own_mentions} keer dat {brand_name} genoemd "
-                f"werd, kon slechts {own_checkable} claim(s) daadwerkelijk gecontroleerd worden tegen eigen "
-                f"documentatie; {own_unverifiable} bleven “unverifiable” — niet omdat de AI iets fout "
-                f"beweerde, maar omdat er simpelweg niets in de eigen documentatie stond om het tegen te "
-                f"leggen. Dit is dus GEEN bevestiging dat alle AI-antwoorden correct zijn, alleen dat er geen "
-                f"fout is aangetoond op het kleine deel dat wél te checken was."
+                f" Important context: of the {own_mentions} times {brand_name} was mentioned, only "
+                f"{own_checkable} claim(s) could actually be checked against your own documentation; "
+                f"{own_unverifiable} stayed “unverifiable” -- not because the AI said something "
+                f"wrong, but because there was simply nothing in your own documentation to check it "
+                f"against. This is NOT confirmation that every AI answer is correct, only that no error was "
+                f"proven on the small share that could actually be checked."
             )
         notes.append(CriticalNote(
-            heading="Geen aangetoonde onjuiste claims (lees de context hieronder)",
+            heading="No incorrect claims found (read the context below)",
             body=checkable_note,
-            advice="Onze aanbeveling: vul eerst de documentatiegaten hieronder in, zodat een vervolgmeting "
-                   "wél een betekenisvol accuracy-cijfer kan opleveren.",
+            advice="Our recommendation: fill in the documentation gaps below first, so a follow-up "
+                   "measurement can produce a meaningful accuracy figure.",
         ))
 
     if scorecard.data_completeness is not None and scorecard.data_completeness < _LOW_COMPLETENESS_THRESHOLD:
         notes.append(CriticalNote(
-            heading=f"Eigen documentatiedekking is laag ({scorecard.data_completeness:.0%})",
-            body="Data completeness meet welk deel van de toepasselijke specs een geciteerde waarde heeft in "
-                 "de eigen documentatie — onafhankelijk van wat een AI zegt. Bij een lage dekking heeft dit "
-                 "audit-systeem voor het grootste deel van de AI-antwoorden simpelweg niets om tegen te "
-                 "controleren, dus vallen ze in “unverifiable” in plaats van correct of incorrect.",
-            advice="Onze aanbeveling: behandel dit rapport in de huidige vorm primair als een "
-                   "documentatie-audit, niet als een AI-accuracy-audit — dat laatste wordt pas betrouwbaar "
-                   "zodra de dekking omhoog gaat.",
+            heading=f"Your own documentation coverage is low ({scorecard.data_completeness:.0%})",
+            body="Data completeness measures what share of applicable specs has a cited value in your own "
+                 "documentation -- independent of anything an AI says. At low coverage, this audit simply "
+                 "has nothing to check most AI answers against, so they fall into “unverifiable” "
+                 "instead of correct or incorrect.",
+            advice="Our recommendation: treat this report, in its current form, primarily as a "
+                   "documentation audit, not an AI-accuracy audit -- the latter only becomes reliable once "
+                   "coverage goes up.",
         ))
 
     if documentation_gaps:
         notes.append(CriticalNote(
-            heading=f"{len(documentation_gaps)} documentatiegat(en) gevonden",
-            body="Zie de sectie “Documentation gaps” verderop voor de volledige lijst, geprioriteerd "
-                 "in de remediation-tabel.",
+            heading=f"{len(documentation_gaps)} documentation gap(s) found",
+            body="See the “Documentation gaps” section further on for the full list, prioritised "
+                 "in the remediation table.",
         ))
 
     if page_visibility_gaps:
         notes.append(CriticalNote(
-            heading=f"{len(page_visibility_gaps)} page-visibility gat(en) gevonden",
-            body="Deze specs staan wél geverifieerd in de eigen documentatie, maar niet als leesbare tekst op "
-                 "de eigen productpagina — waarschijnlijk vastzittend in een PDF of een tabel-als-afbeelding.",
+            heading=f"{len(page_visibility_gaps)} page-visibility gap(s) found",
+            body="These specs ARE verified in your own documentation, but do not appear as readable text on "
+                 "your own product page -- likely trapped in a PDF or a table rendered as an image.",
         ))
 
     return notes
+
+
+def _build_problem_statement(*, brand_name: str, competitive_picture: list[dict]) -> str:
+    """One sentence, as concrete and unavoidable as this run's real numbers
+    allow -- the report's own opening line, not a teaser for later. Always
+    derived from the actual competitive_picture data for this run, never a
+    canned line: if the numbers don't support a striking comparison, this
+    says so plainly instead of manufacturing one."""
+    totals: dict[str, dict] = {}
+    for row in competitive_picture:
+        key = row["brand_name"].strip().lower()
+        entry = totals.setdefault(key, {"name": row["brand_name"], "mentions": 0, "is_competitor": row["is_competitor"]})
+        entry["mentions"] += row["mentions"]
+
+    own = next((v for v in totals.values() if not v["is_competitor"] and v["name"].strip().lower() == brand_name.strip().lower()), None)
+    own_mentions = own["mentions"] if own else 0
+    competitors = sorted((v for v in totals.values() if v["is_competitor"]), key=lambda v: -v["mentions"])
+    top_competitor = competitors[0] if competitors else None
+
+    if not top_competitor:
+        return (
+            f"No competitor was mentioned often enough this run to draw a direct comparison -- see the "
+            f"Competitive picture section for the full breakdown."
+        )
+    if own_mentions == 0:
+        return (
+            f"{top_competitor['name']} was mentioned {top_competitor['mentions']} time(s) by AI answers in "
+            f"this audit -- {brand_name} was not mentioned once."
+        )
+    ratio = top_competitor["mentions"] / own_mentions
+    return (
+        f"{top_competitor['name']} is mentioned {ratio:.1f}x more often than {brand_name} in this audit's "
+        f"AI answers ({top_competitor['mentions']} vs {own_mentions} mentions)."
+    )
 
 
 def gather_report_data(conn, *, run_id: str) -> ReportData:
@@ -360,6 +529,7 @@ def gather_report_data(conn, *, run_id: str) -> ReportData:
         scorecard=scorecard, documentation_gaps=documentation_gaps, page_visibility_gaps=page_visibility_gaps,
     )
     prompts_and_answers = db.get_prompts_and_answers_for_run(conn, run_id)
+    problem_statement = _build_problem_statement(brand_name=run["brand_name"], competitive_picture=competitive_picture)
 
     return ReportData(
         brand_name=run["brand_name"], run=run, scorecard=scorecard, worst_findings=worst_findings,
@@ -367,6 +537,7 @@ def gather_report_data(conn, *, run_id: str) -> ReportData:
         crawlability_check=crawlability_check, crawlability_agents=crawlability_agents,
         page_visibility_checks=page_visibility_checks, page_visibility_gaps=page_visibility_gaps,
         prompts_and_answers=prompts_and_answers, remediation=remediation, critical_notes=critical_notes,
+        problem_statement=problem_statement,
     )
 
 
@@ -416,76 +587,137 @@ def render_pdf(data: ReportData, output_path: str) -> None:
     story: list = []
     run = data.run
     sc = data.scorecard
+    n_answers = len(data.prompts_and_answers)
+    n_prompts = len(set(r["prompt_id"] for r in data.prompts_and_answers))
 
-    # 1. Method -- first, not an appendix.
     story.append(Paragraph(f"AI Visibility Audit: {data.brand_name}", ss["Title"]))
-    story.append(Paragraph("Method", ss["H1"]))
     story.append(Paragraph(
-        f"This report covers one benchmark run against <b>{run['engine']}</b> "
-        f"(requested model: {run['requested_model']}), {run['replicates']} replicate(s) per prompt, "
-        f"started {run['started_at']}.", ss["Normal"],
+        f"Benchmark run against <b>{run['engine']}</b> (requested model: {run['requested_model']}), "
+        f"{run['replicates']} repeat(s) per question, started {run['started_at']}.", ss["Small"],
     ))
+    story.append(Spacer(1, 4 * mm))
 
-    story.append(Paragraph("Hoe dit rapport is opgebouwd", ss["H2"]))
+    # 1. The problem -- one sentence, as concrete as the real numbers allow.
+    story.append(Paragraph("1. The problem", ss["H1"]))
+    story.append(Paragraph(f"<b>{_xml_escape(data.problem_statement)}</b>", ss["Normal"]))
+    story.append(Spacer(1, 4 * mm))
+
+    # 2. Introduction.
+    story.append(Paragraph("2. Introduction", ss["H1"]))
     story.append(Paragraph(
-        "Elke sectie beantwoordt een andere vraag, in deze volgorde: <b>Scores</b> (de 4 kerncijfers, overall "
-        "en per intentie), <b>Critical notes</b> (onze eigen beoordeling en advies — altijd ingevuld, ook als "
-        "er geen fouten zijn gevonden), <b>Competitive picture</b> (wie wordt hoe vaak genoemd, per intentie, "
-        "inclusief concurrenten), <b>Documentation gaps</b> (wat de AI beweerde zonder dat wij het konden "
-        "controleren), <b>Crawlability</b> (mogen AI-bots de site uberhaupt lezen), <b>Page-visibility gaps</b> "
-        "(staat een geverifieerde waarde ook als leesbare tekst op de eigen productpagina), "
-        "<b>Remediation</b> (alles hierboven samengevat in één geprioriteerde actielijst), en tot slot een "
-        "<b>Appendix</b> met alle prompts en alle daadwerkelijk gegeven AI-antwoorden, zodat elke conclusie "
-        "in dit rapport zelf te controleren is.", ss["Normal"],
+        f"The sentence above is one of many findings in this research. This research was carried out to "
+        f"investigate how well AI systems can find {data.brand_name}'s products, and can therefore cite "
+        f"{data.brand_name} correctly as a supplier when someone asks. The rest of this report explains how "
+        f"we tested that, what we found, and what to do about it.", ss["Normal"],
     ))
+    story.append(Spacer(1, 4 * mm))
 
-    story.append(Paragraph("Wat wordt precies gemeten, en hoe", ss["H2"]))
+    # 3. About HardhatsAI.
+    story.append(Paragraph("3. About HardhatsAI", ss["H1"]))
     story.append(Paragraph(
-        "Elke technische bewering die de AI doet ({} antwoorden op {} prompts x {} herhaling(en)) wordt eruit "
-        "gehaald en vergeleken met geverifieerde ground truth: een feit dat letterlijk terug te vinden is in "
-        "een fabrikantendocument, met paginanummer en woordelijk citaat. <b>Belangrijk: die ground truth komt "
-        "uitsluitend uit de eigen documentatie van {} — nooit uit wat de AI zelf zegt.</b> Er wordt dus niet "
-        "getest of de AI het met zichzelf eens is; er wordt getest of de AI het eens is met wat {} zelf "
-        "publiceert. Een bewering zonder ground truth om tegen te leggen — geen enkele rij, of het document "
-        "is er expliciet stil over — telt nooit als fout; die wordt apart gerapporteerd als een "
-        "documentatiegat.".format(
-            len(data.prompts_and_answers), len(set(r["prompt_id"] for r in data.prompts_and_answers)),
-            run["replicates"], data.brand_name, data.brand_name,
-        ),
+        "We are HardhatsAI, and we are construction professionals ourselves. We have experienced first-hand "
+        "how hard it is to find the right suppliers and specifications among the thousands of products that "
+        "can go into a single building. With that industry knowledge, we want to make a difference and close "
+        "the gap between suppliers and architects/engineers by improving how well AI can find and represent "
+        "them.", ss["Normal"],
+    ))
+    story.append(Spacer(1, 4 * mm))
+
+    # 4. Methodology.
+    story.append(Paragraph("4. Methodology", ss["H1"]))
+    story.append(Paragraph(
+        f"We asked 3 AI models 50 questions each. These questions are divided into themes (see Section 5), "
+        f"and are specifically written so that the answer to each one is information that exists in "
+        f"{data.brand_name}'s own documentation. We then test whether the AI mentions {data.brand_name} as a "
+        f"product, why it possibly does or doesn't, who else gets mentioned instead, and turn that into data. "
+        f"That data is summarised into four themes (Section 5), reported both overall and per question "
+        f"category. From there we draw conclusions and give a recommendation and a remediation plan "
+        f"(Section 6) on how AI could find {data.brand_name} better and more accurately. Every conclusion in "
+        f"Section 6 states how it was determined.", ss["Normal"],
+    ))
+    story.append(Paragraph(
+        "<b>What this methodology does NOT yet do:</b> today's questions are realistic, real-world-style "
+        "questions an architect or specifier would actually ask -- they are not built by taking a specific "
+        "fact from your documentation and asking the AI to retrieve it directly. A complementary, more "
+        "targeted test -- picking a fact that is already correctly documented and asking the AI specifically "
+        "about it, to measure retrieval/citation performance on KNOWN facts rather than organic mention "
+        "behaviour -- is a natural next addition to this methodology. It is not implemented in this report.",
+        ss["Small"],
+    ))
+    story.append(PageBreak())
+
+    # 5. The research: intents with their real prompts, then the four themes explained.
+    story.append(Paragraph("5. The research", ss["H1"]))
+    story.append(Paragraph(
+        f"We asked {n_prompts} questions, each repeated {run['replicates']} time(s) ({n_answers} answers "
+        f"total against {run['engine']} for this run). Every question was pre-assigned to one of 7 "
+        f"categories ({', '.join(INTENT_GLOSSARY)}), so we can see whether a brand is strong on one type of "
+        f"question but invisible on another -- that difference is the whole sales argument of this report. "
+        f"Below, each category is explained, followed by the real questions asked in it and why each one was "
+        f"chosen. The answers themselves are in the Appendix.", ss["Normal"],
+    ))
+    story.append(Spacer(1, 3 * mm))
+
+    prompts_by_intent: dict[str, list[str]] = {}
+    for row in data.prompts_and_answers:
+        lst = prompts_by_intent.setdefault(row["intent"], [])
+        if row["prompt_text"] not in lst:
+            lst.append(row["prompt_text"])
+
+    for intent, info in INTENT_GLOSSARY.items():
+        prompts = prompts_by_intent.get(intent, [])
+        if not prompts:
+            continue
+        story.append(Paragraph(f"{info['label']} ({intent})", ss["H2"]))
+        story.append(Paragraph(info["definition"], ss["Normal"]))
+        for prompt_text in prompts:
+            rationale = PROMPT_RATIONALES.get(prompt_text, "")
+            block = [Paragraph(f"“{_xml_escape(prompt_text)}”", ss["Cell"])]
+            if rationale:
+                block.append(Paragraph(_xml_escape(rationale), ss["Small"]))
+            story.append(KeepTogether(block))
+        story.append(Spacer(1, 3 * mm))
+
+    story.append(PageBreak())
+    story.append(Paragraph("The four themes we test on", ss["H2"]))
+    story.append(Paragraph(
+        f"We assess every answer on four independent themes, deliberately not combined into one score. "
+        f"<b>Important: the ground truth we compare against comes exclusively from {data.brand_name}'s own "
+        f"documentation -- never from what the AI itself says.</b> We are not testing whether the AI agrees "
+        f"with itself; we are testing whether the AI agrees with what {data.brand_name} itself publishes. A "
+        f"claim with no ground truth to compare against -- no row at all, or the document is explicitly "
+        f"silent -- is never counted as an error; it is reported separately as a documentation gap.",
         ss["Normal"],
     ))
-    story.append(Paragraph(
-        "Vier cijfers worden hieronder los gerapporteerd, bewust niet samengevoegd tot één score (één score "
-        "nodigt uit tot \"hoe kom je daarbij\" en verplaatst het gesprek naar grond die niet te verdedigen "
-        "is):", ss["Normal"],
-    ))
-    metric_rows_raw = [
-        ("Presence rate", "Komt de merknaam letterlijk voor in het ruwe AI-antwoord, ongeacht of er een "
-                           "specifieke claim bij zit.",
-         "Zonder presence geen enkele kans om gekozen te worden — dit is de basisdrempel."),
-        ("Share of voice", "Het aandeel van dit merk in alle merkvermeldingen die een controleerbare "
-                            "spec-claim bevatten (dus niet elke vermelding, alleen de \"zakelijke\" "
-                            "vermeldingen).",
-         "Laat zien hoe je concreet meetelt tussen concurrenten, niet alleen of je genoemd wordt."),
-        ("Spec accuracy", "Van de claims die daadwerkelijk gecontroleerd konden worden: welk deel klopte.",
-         "Dit is de enige metric die iets zegt over juistheid — en dus ook de enige die \"no data\" kan "
-         "tonen als er te weinig ground truth is om iets te controleren."),
-        ("Data completeness", "Welk deel van de toepasselijke specs een geciteerde waarde heeft in de eigen "
-                               "documentatie — volledig onafhankelijk van welk AI-antwoord dan ook.",
-         "Dit cijfer legt het plafond vast voor hoe betrouwbaar spec accuracy kán zijn: is dit laag, dan is "
-         "een hoge spec accuracy sowieso onmogelijk te meten, ongeacht hoe goed de AI het echt doet."),
+    story.append(Spacer(1, 3 * mm))
+
+    theme_defs = [
+        ("Presence Rate", "Does the brand's name appear anywhere in the raw AI answer at all, regardless of "
+                           "whether a specific, checkable claim comes with it.",
+         "Without presence there is no chance at all of being chosen -- this is the baseline threshold."),
+        ("Share of Voice", "This brand's share of all brand mentions that carry a checkable spec claim (so "
+                            "not every mention -- only the \"substantive\" ones).",
+         "Shows how you actually measure up against competitors, not just whether you get mentioned."),
+        ("Spec Accuracy", "Of the claims that could actually be checked: what share of them were correct.",
+         "The only theme that says anything about correctness -- and therefore the only one that can show "
+         "\"no data\" when there isn't enough ground truth to check anything against."),
+        ("Data Completeness", "What share of applicable specs has a cited value in the brand's own "
+                               "documentation -- entirely independent of any AI answer.",
+         "This sets the ceiling for how reliable Spec Accuracy can ever be: if this is low, a high Spec "
+         "Accuracy is impossible to measure, no matter how good the AI actually is."),
     ]
-    metric_rows = [["Cijfer", "Wat het meet", "Waarom het ertoe doet"]]
-    for cijfer, wat, waarom in metric_rows_raw:
-        metric_rows.append([_cell(cijfer, ss["Cell"]), _cell(wat, ss["Cell"]), _cell(waarom, ss["Cell"])])
-    story.append(_table(metric_rows, col_widths=[32 * mm, 68 * mm, 60 * mm]))
+    for title, what, why in theme_defs:
+        story.append(Paragraph(title, ss["H2"]))
+        story.append(Paragraph(f"<b>What it measures:</b> {what}", ss["Normal"]))
+        story.append(Paragraph(f"<b>Why it matters:</b> {why}", ss["Normal"]))
+
     story.append(Spacer(1, 3 * mm))
     story.append(Paragraph(
-        "<b>Lees dit zorgvuldig:</b> een \"unverifiable\"-verdict of een documentatiegat betekent NIET dat de "
-        "AI iets fout heeft gezegd, en ook niet dat de AI \"te generiek\" is. Het betekent dat onze eigen "
-        "documentatie op dat punt geen citeerbare waarde bevat om het antwoord tegen te controleren. Bij een "
-        "lage data completeness (zie hierboven) is dat de meest waarschijnlijke verklaring voor bijna elk "
-        "\"unverifiable\"-resultaat in dit rapport — niet een tekortkoming van de AI.", ss["Normal"],
+        "<b>Read this carefully:</b> an \"unverifiable\" verdict or a documentation gap does NOT mean the AI "
+        "said something wrong, and it does not mean the AI is \"too generic\" either. It means our own "
+        "documentation has no citable value on that point to check the answer against. At low data "
+        "completeness, that is the most likely explanation for almost every \"unverifiable\" result in this "
+        "report -- not a shortcoming of the AI.", ss["Normal"],
     ))
     if not sc.claims_extracted_for_run:
         story.append(Paragraph(
@@ -493,77 +725,63 @@ def render_pdf(data: ReportData, output_path: str) -> None:
             "below show “no data”, not a real zero.", ss["Small"],
         ))
 
-    story.append(Paragraph("Wat betekenen de \"intents\" (promptcategorieën)", ss["H2"]))
-    story.append(Paragraph(
-        "Elke prompt is vooraf ingedeeld in één van 7 categorieën, om te kunnen zien of een merk sterk is op "
-        "het ene type vraag maar onzichtbaar op het andere — dat verschil is precies het verkoopargument.",
-        ss["Normal"],
-    ))
-    glossary_rows = [["Intent", "Betekenis", "Voorbeeldprompt"]]
-    for key, info in INTENT_GLOSSARY.items():
-        glossary_rows.append([
-            _cell(f"{key} ({info['label']})", ss["Cell"]),
-            _cell(info["definition"], ss["Cell"]),
-            _cell(f"“{info['example']}”", ss["Cell"]),
-        ])
-    story.append(_table(glossary_rows, col_widths=[35 * mm, 75 * mm, 55 * mm]))
+    story.append(PageBreak())
 
-    # 2. The four numbers, overall + per intent.
-    story.append(Paragraph("Scores", ss["H1"]))
+    # 6. Conclusions: everything this run actually found, in one place.
+    story.append(Paragraph("6. Conclusions", ss["H1"]))
+
+    story.append(Paragraph("Scores", ss["H2"]))
+    story.append(Paragraph(
+        "How this was determined: computed directly from this run's benchmark answers, extracted claims, "
+        "and the brand's current documentation -- see Section 5 for what each theme measures.", ss["Small"],
+    ))
     story.append(_table(
-        [["Metric", "Overall"],
-         ["Presence rate", _fmt_rate(sc.presence_rate.overall)],
-         ["Share of voice", _fmt_rate(sc.share_of_voice.overall)],
-         ["Spec accuracy", _fmt_rate(sc.spec_accuracy.overall)],
-         ["Data completeness (brand-level, not run-scoped)", _fmt_rate(sc.data_completeness)]],
+        [["Theme", "Overall"],
+         ["Presence Rate", _fmt_rate(sc.presence_rate.overall)],
+         ["Share of Voice", _fmt_rate(sc.share_of_voice.overall)],
+         ["Spec Accuracy", _fmt_rate(sc.spec_accuracy.overall)],
+         ["Data Completeness (brand-level, not run-scoped)", _fmt_rate(sc.data_completeness)]],
         col_widths=[110 * mm, 50 * mm],
     ))
-
     intents = sorted(set(sc.presence_rate.per_intent) | set(sc.share_of_voice.per_intent)
                       | set(sc.spec_accuracy.per_intent))
     if intents:
         story.append(Spacer(1, 4 * mm))
-        story.append(Paragraph("Per prompt-intent", ss["H2"]))
-        rows = [["Intent", "Presence", "Share of voice", "Spec accuracy"]]
+        story.append(Paragraph("Per question category", ss["H2"]))
+        rows = [["Category", "Presence Rate", "Share of Voice", "Spec Accuracy"]]
         for intent in intents:
             rows.append([intent, _fmt_rate(sc.presence_rate.per_intent.get(intent)),
                          _fmt_rate(sc.share_of_voice.per_intent.get(intent)),
                          _fmt_rate(sc.spec_accuracy.per_intent.get(intent))])
         story.append(_table(rows, col_widths=[50 * mm, 35 * mm, 40 * mm, 35 * mm]))
-
     story.append(Spacer(1, 3 * mm))
     story.append(Paragraph(
-        "Waarom dit ertoe doet: een merk kan sterk scoren op brand_direct (waar de naam al in de vraag "
-        "staat) en tegelijk onzichtbaar zijn op spec_constrained (waar een koper geen merk noemt, alleen een "
-        "eis) — dat is precies het verschil tussen \"herkend worden\" en \"gevonden worden\", en de kern van "
-        "het verkoopargument in dit rapport.", ss["Small"],
+        "Why this matters: a brand can score strongly on brand_direct (where the name is already in the "
+        "question) while being invisible on spec_constrained (where a buyer names no brand, only a "
+        "requirement) -- that is exactly the difference between \"being recognised\" and \"being found\".",
+        ss["Small"],
     ))
 
     story.append(PageBreak())
 
-    # 3. Critical notes -- ALWAYS populated, never a bare pass/fail line.
-    # Renamed from "Worst findings": this section must carry our own
-    # advisory read of the numbers even when nothing was found to be
-    # flatly wrong, because "nothing wrong found" and "confirmed correct"
-    # are two very different claims once data completeness is low.
-    story.append(Paragraph("Critical notes", ss["H1"]))
+    story.append(Paragraph("Critical Notes", ss["H2"]))
     story.append(Paragraph(
-        "Onze eigen beoordeling van de belangrijkste bevindingen in deze run, met advies. Deze sectie staat "
-        "er altijd, ook wanneer er geen aantoonbaar onjuiste claims zijn gevonden — context en advies zijn "
-        "dan minstens zo belangrijk als een schone lijst.", ss["Small"],
+        "Our own assessment of the most important findings in this run, with advice. This section is always "
+        "present, even when no demonstrably incorrect claims were found -- context and advice matter at "
+        "least as much as a clean list.", ss["Small"],
     ))
     for note in data.critical_notes:
         block = [
-            Paragraph(f"<b>{note.heading}</b>", ss["H2"]),
-            Paragraph(note.body, ss["Normal"]),
+            Paragraph(f"<b>{_xml_escape(note.heading)}</b>", ss["Normal"]),
+            Paragraph(_xml_escape(note.body), ss["Normal"]),
         ]
         if note.advice:
-            block.append(Paragraph(f"<b>Advies:</b> {note.advice}", ss["Normal"]))
+            block.append(Paragraph(f"<b>Advice:</b> {_xml_escape(note.advice)}", ss["Normal"]))
         story.append(KeepTogether(block))
         story.append(Spacer(1, 3 * mm))
 
     if data.worst_findings:
-        story.append(Paragraph("Detail per onjuiste/verwarde claim", ss["H2"]))
+        story.append(Paragraph("Detail per incorrect/confused claim", ss["H2"]))
         for finding in data.worst_findings:
             citations = finding.get("citations") or []
             gt_known = bool(finding.get("gt_document_title"))
@@ -574,8 +792,8 @@ def render_pdf(data: ReportData, output_path: str) -> None:
             )
             block = [
                 Paragraph(f"<b>{finding['product_name']} — {finding['spec_name_nl']}</b> ({finding['verdict']})",
-                          ss["H2"]),
-                Paragraph(f"Prompt ({finding['intent']}): “{finding['prompt_text']}”", ss["Normal"]),
+                          ss["Normal"]),
+                Paragraph(f"Question ({finding['intent']}): “{finding['prompt_text']}”", ss["Normal"]),
                 Paragraph(
                     f"AI said: “{finding['source_quote']}” ({finding['engine']}"
                     + (f", resolved model {finding['resolved_model_version']}"
@@ -593,21 +811,19 @@ def render_pdf(data: ReportData, output_path: str) -> None:
 
     story.append(PageBreak())
 
-    # 4. Competitive picture per intent.
-    story.append(Paragraph("Competitive picture per intent", ss["H1"]))
+    story.append(Paragraph("Competitive Picture", ss["H2"]))
     story.append(Paragraph(
-        "Waarom dit ertoe doet: dit is de tabel achter de kale presence rate/share of voice-cijfers hierboven "
-        "— hier zie je met concurrentnamen en aantallen wie er daadwerkelijk wordt genoemd per type vraag. "
-        "Correct/Incorrect/Confused zijn alleen gevuld waar een claim daadwerkelijk gecontroleerd kon worden "
-        "(zie de Method-sectie hierboven over data completeness); een rij met alleen \"Unverifiable\" betekent "
-        "dus niet dat dat merk niets goeds zei, alleen dat er niets was om het tegen te controleren.", ss["Small"],
+        "How this was determined: every distinct brand mention carrying a checkable spec claim, counted per "
+        "question category. Correct/Incorrect/Confused are only filled in where a claim could actually be "
+        "checked (see Data Completeness, Section 5); a row with only \"Unverifiable\" does not mean that "
+        "brand said nothing useful -- only that there was nothing to check it against.", ss["Small"],
     ))
     if not data.competitive_picture:
         story.append(Paragraph(
             "No brand mentions with a checkable spec claim were extracted for this run.", ss["Normal"],
         ))
     else:
-        rows = [["Intent", "Brand", "Mentions", "Correct", "Incorrect", "Confused", "Unverifiable"]]
+        rows = [["Category", "Brand", "Mentions", "Correct", "Incorrect", "Confused", "Unverifiable"]]
         for row in data.competitive_picture:
             label = row["brand_name"] + (" (competitor)" if row["is_competitor"] else "")
             rows.append([_cell(row["intent"], ss["Cell"]), _cell(label, ss["Cell"]), str(row["mentions"]),
@@ -617,22 +833,18 @@ def render_pdf(data: ReportData, output_path: str) -> None:
 
     story.append(PageBreak())
 
-    # 5. Documentation gaps.
-    story.append(Paragraph("Documentation gaps", ss["H1"]))
+    story.append(Paragraph("Documentation Gaps", ss["H2"]))
     story.append(Paragraph(
-        "The AI made a claim about one of these specs, but your own documentation has no current, "
-        "verifiable value to check it against — not an error, an opportunity.", ss["Normal"],
-    ))
-    story.append(Paragraph(
-        "Waarom dit ertoe doet: dit is GEEN lijst van fouten van de AI. Het is een lijst van punten waar "
-        "wij zelf niets citeerbaars hebben staan om te bevestigen of tegen te spreken wat een AI erover zegt "
-        "— waardoor we geen controle hebben over dat deel van het verhaal, ongeacht of het antwoord nu "
-        "toevallig klopt of niet.", ss["Small"],
+        "How this was determined: the AI made a claim about one of these specs, and the brand's own "
+        "documentation has no current, verifiable value to check it against. This is NOT a list of AI "
+        "mistakes -- it is a list of points where the brand itself has nothing citable on file to confirm "
+        "or contradict what an AI says, meaning the brand has no control over that part of the story, "
+        "whether the AI's answer happens to be right or not.", ss["Small"],
     ))
     if not data.documentation_gaps:
         story.append(Paragraph("None found.", ss["Normal"]))
     else:
-        rows = [["Product", "Spec", "Intent", "AI said"]]
+        rows = [["Product", "Spec", "Category", "AI said"]]
         for gap in data.documentation_gaps:
             rows.append([_cell(gap["product_name"], ss["Cell"]), _cell(gap["spec_name_nl"], ss["Cell"]),
                          _cell(gap["intent"], ss["Cell"]), _cell(gap["source_quote"], ss["Cell"])])
@@ -640,13 +852,13 @@ def render_pdf(data: ReportData, output_path: str) -> None:
 
     story.append(PageBreak())
 
-    # 6. Crawlability.
-    story.append(Paragraph("Crawlability", ss["H1"]))
+    story.append(Paragraph("Crawlability", ss["H2"]))
     story.append(Paragraph(
-        "Waarom dit ertoe doet: als een AI-bot hier \"no\" krijgt, kan die AI de site letterlijk niet lezen — "
-        "dan doet de kwaliteit van de content er niet meer toe. Dit is de enige sectie in dit rapport die "
-        "puur technisch is (geen AI-antwoorden nodig om te meten): een blokkade hier is meestal een "
-        "één-regel-fix met het grootst mogelijke effect.", ss["Small"],
+        "How this was determined: robots.txt was fetched and evaluated against real precedence rules "
+        "(most-specific user-agent group wins, longest matching path rule wins) for every major AI crawler. "
+        "If a bot gets \"no\" here, that AI cannot read the site at all -- content quality stops mattering. "
+        "This is the only purely technical section in this report (no AI answers needed to measure it): a "
+        "block here is usually a one-line fix with the largest possible impact.", ss["Small"],
     ))
     if not data.crawlability_check:
         story.append(Paragraph("No crawlability check has been run yet for this brand.", ss["Normal"]))
@@ -661,18 +873,19 @@ def render_pdf(data: ReportData, output_path: str) -> None:
         rows = [["Agent", "Allowed", "Matched rule"]]
         for agent in data.crawlability_agents:
             allowed = "yes" if agent["allowed"] is True else ("no" if agent["allowed"] is False else "undetermined")
-            rows.append([agent["agent_name"], allowed,
+            rows.append([_cell(agent["agent_name"], ss["Cell"]), allowed,
                          _cell(agent["matched_rule"] or "(default -- no matching rule)", ss["Cell"])])
         story.append(_table(rows, col_widths=[35 * mm, 25 * mm, 100 * mm]))
 
     story.append(PageBreak())
 
-    # 7. Page-visibility gaps.
-    story.append(Paragraph("Page-visibility gaps", ss["H1"]))
+    story.append(Paragraph("Page-Visibility Gaps", ss["H2"]))
     story.append(Paragraph(
-        "For each gap below, a verified spec value exists in your documentation but does not appear as "
-        "literal text on the product's own public page — likely trapped in a PDF or a table rendered "
-        "as an image, both invisible to an AI that only reads page text.", ss["Normal"],
+        "How this was determined: for each verified spec value in the brand's own documentation, we checked "
+        "whether that value also appears as literal, readable text on the product's own public page. A gap "
+        "here means the value is likely trapped in a PDF or a table rendered as an image -- both invisible "
+        "to an AI that only reads page text, even though the fact itself is fully documented and correct.",
+        ss["Small"],
     ))
     if not data.page_visibility_gaps:
         story.append(Paragraph("None found.", ss["Normal"]))
@@ -686,11 +899,12 @@ def render_pdf(data: ReportData, output_path: str) -> None:
 
     story.append(PageBreak())
 
-    # 8. Remediation, ordered by impact / effort.
-    story.append(Paragraph("Remediation, ordered by impact ÷ effort", ss["H1"]))
+    story.append(Paragraph("Remediation, ordered by impact ÷ effort", ss["H2"]))
     story.append(Paragraph(
-        "Effort/impact are staff judgment heuristics (1=low, 3=high), not derived from cost data -- "
-        "ordering is a starting point for triage, not a guarantee.", ss["Small"],
+        "How this was determined: every item above (crawlability blocks, documentation gaps, page-visibility "
+        "gaps, incorrect claims) rolled into one prioritised list. Effort/impact are staff judgment "
+        "heuristics (1=low, 3=high), not derived from cost data -- ordering is a starting point for triage, "
+        "not a guarantee.", ss["Small"],
     ))
     if not data.remediation:
         story.append(Paragraph("No remediation items identified.", ss["Normal"]))
@@ -703,17 +917,17 @@ def render_pdf(data: ReportData, output_path: str) -> None:
 
     story.append(PageBreak())
 
-    # 9. Appendix: every prompt and every raw answer -- full auditability.
-    # Every claim/verdict/gap above is derived from this data; a client
-    # must be able to read the source material itself, not just our
-    # extracted conclusions about it.
-    story.append(Paragraph("Appendix: alle prompts en AI-antwoorden", ss["H1"]))
+    # 7. Appendix: every prompt and every raw answer -- full auditability.
+    # Rationale for each question already lives in Section 5; this is
+    # purely the source material -- a client must be able to read exactly
+    # what was asked and exactly what came back, unmediated.
+    story.append(Paragraph("7. Appendix: all questions and AI answers", ss["H1"]))
     story.append(Paragraph(
-        f"Alle {len(data.prompts_and_answers)} antwoorden die {run['engine']} daadwerkelijk gaf op de "
-        f"{len(set(r['prompt_id'] for r in data.prompts_and_answers))} prompts van deze run, ongewijzigd en "
-        f"volledig — dit is de brontekst waar elke conclusie in dit rapport op is gebaseerd. Gegroepeerd per "
-        f"intent, dan per prompt; elke herhaling (replicate) apart, omdat de antwoorden per keer kunnen "
-        f"verschillen.", ss["Normal"],
+        f"All {n_answers} answers {run['engine']} actually gave to the {n_prompts} questions in this run, "
+        f"unedited and in full -- this is the source text every conclusion in this report is based on. "
+        f"Grouped by category, then by question; each repeat shown separately since answers can differ "
+        f"between repeats. Questions and answers are shown in their original language (Dutch, matching this "
+        f"brand's market) so they can be matched verbatim against the live prompt set.", ss["Normal"],
     ))
 
     current_intent = None
@@ -722,14 +936,14 @@ def render_pdf(data: ReportData, output_path: str) -> None:
         if row["intent"] != current_intent:
             current_intent = row["intent"]
             label = INTENT_GLOSSARY.get(current_intent, {}).get("label", current_intent)
-            story.append(Paragraph(f"{current_intent} ({label})", ss["H1"]))
+            story.append(Paragraph(f"{label} ({current_intent})", ss["H1"]))
             current_prompt = None
         if row["prompt_text"] != current_prompt:
             current_prompt = row["prompt_text"]
-            story.append(Paragraph(f"Prompt: “{_xml_escape(current_prompt)}”", ss["H2"]))
+            story.append(Paragraph(f"Question: “{_xml_escape(current_prompt)}”", ss["H2"]))
         model_note = f" — {_xml_escape(row['resolved_model_version'])}" if row.get("resolved_model_version") else ""
-        story.append(Paragraph(f"<b>Antwoord {row['replicate_index'] + 1}{model_note}:</b>", ss["Small"]))
-        answer_text = _xml_escape(row["response_text"] or "(leeg antwoord)").replace("\n", "<br/>")
+        story.append(Paragraph(f"<b>Answer {row['replicate_index'] + 1}{model_note}:</b>", ss["Small"]))
+        answer_text = _xml_escape(row["response_text"] or "(empty answer)").replace("\n", "<br/>")
         story.append(Paragraph(answer_text, ss["Cell"]))
         story.append(Spacer(1, 3 * mm))
 
