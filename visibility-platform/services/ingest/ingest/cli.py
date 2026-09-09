@@ -79,7 +79,7 @@ from anthropic import Anthropic
 
 from . import (
     benchmark, claims_diff, crawlability, db, page_visibility, pdf_report, pipeline, report, scoring, storage,
-    visibility,
+    visibility, webpage,
 )
 from .config import load_config
 from .http_fetch import make_httpx_fetcher
@@ -402,6 +402,137 @@ def cmd_ingest_dir(args: argparse.Namespace) -> int:
         print(f"  SKIP  {line}")
 
     return 1 if rejected else 0
+
+
+def _recover_connection(conn, config):
+    """Roll back if the connection is still alive; if it isn't (a dead
+    pooler connection makes rollback() itself raise), close it and open a
+    fresh one instead of letting a long batch job crash on one page."""
+    try:
+        conn.rollback()
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return db.connect(config.database_url)
+
+
+def cmd_ingest_website(args: argparse.Namespace) -> int:
+    """Crawl a brand's own live website (same-domain, same-path-prefix
+    only -- see webpage.crawl) and run it through the exact same
+    extraction/citation pipeline as an uploaded PDF (webpage.py's module
+    docstring explains why this is genuinely the same standard, not a
+    second weaker one). --dry-run crawls (fetching pages is unavoidable
+    for link discovery) but prints the discovered page count/URLs without
+    writing anything to the DB or spending any LLM credits -- always run
+    this first, same convention as `benchmark --dry-run`."""
+    config = load_config()
+    conn = db.connect(config.database_url)
+
+    brand = db.get_brand_by_slug(conn, args.brand_slug)
+    if brand is None:
+        print(f"no brand with slug '{args.brand_slug}' -- create it in the portal/dashboard first")
+        return 1
+
+    fetcher = make_httpx_fetcher(timeout=20.0)
+    print(f"crawling {args.url} (max {args.max_pages} pages)...")
+    pages = webpage.crawl(args.url, fetcher=fetcher, max_pages=args.max_pages)
+    print(f"discovered {len(pages)} page(s)")
+
+    if args.dry_run:
+        for p in pages:
+            print(f"  {p.url}")
+        conn.close()
+        return 0
+
+    client = storage.make_client(config.supabase_url, config.supabase_service_role_key)
+    org_slug = args.brand_slug
+    allowed_prefix = webpage.compute_allowed_prefix(args.url)
+
+    uploaded: list[str] = []
+    skipped: list[str] = []
+    extraction_results: list[dict] = []
+
+    for crawled in pages:
+        if not webpage.is_product_page(crawled.url, allowed_prefix):
+            skipped.append(f"{crawled.url}: not a product-bearing page (path not in "
+                            f"{sorted(webpage.PRODUCT_PATH_SEGMENTS)}) -- skipped")
+            continue
+
+        parsed = webpage.parse_webpage(crawled.html, crawled.url)
+        if len(parsed.text) < webpage.MIN_PAGE_TEXT_CHARS:
+            skipped.append(f"{crawled.url}: too little text ({len(parsed.text)} chars) -- skipped")
+            continue
+
+        html_bytes = crawled.html.encode("utf-8")
+        sha256 = storage.sha256_bytes(html_bytes)
+        existing_version = db.find_version_by_sha256(conn, sha256)
+        if existing_version:
+            skipped.append(f"{crawled.url}: unchanged since last crawl (document_version "
+                            f"{existing_version['id']}) -- not re-ingested")
+            continue
+
+        # One page's failure -- a storage hiccup, a transient network error,
+        # a bad extraction response -- must never kill the other 100+
+        # pages already queued. Every step from here on is one unit: on
+        # any exception, roll back whatever this page half-committed and
+        # move on, same resilience precedent as the fix in commit eae26e4
+        # (run_visibility/run_claims_extraction: a crash mid-run must not
+        # discard already-paid-for work on EARLIER pages). Observed for
+        # real ingesting ~240 pages: a run long enough to make dozens of
+        # Claude calls interspersed with commits can outlive the Supabase
+        # pooler's own connection lifetime even with TCP keepalives
+        # (db.connect() already sets those) -- conn.rollback() itself then
+        # raises "the connection is lost". _recover_connection reconnects
+        # in that case instead of letting the whole batch die on one page.
+        try:
+            title = webpage.extract_title(crawled.html) or crawled.url
+            document_id = db.create_document(
+                conn, organization_id=brand["organization_id"], product_id=None, title=title, kind="webpage",
+            )
+            path_in_bucket = storage.storage_path(org_slug, sha256, ext="html")
+            storage.upload(client, path_in_bucket, html_bytes, mime_type="text/html")
+            document_version_id = db.create_document_version(
+                conn, document_id=document_id, storage_path=path_in_bucket,
+                original_filename=None, mime_type="text/html", byte_size=len(html_bytes),
+                sha256=sha256, uploaded_by=None, source_url=crawled.url,
+                retrieved_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            conn.commit()
+            uploaded.append(f"{crawled.url}: document_version {document_version_id}")
+        except Exception as exc:
+            conn = _recover_connection(conn, config)
+            skipped.append(f"{crawled.url}: upload/document creation failed -- {exc}")
+            continue
+
+        try:
+            result = pipeline.run_webpage(
+                conn, config, document_version_id=document_version_id,
+                brand_id=brand["id"], brand_name=brand["name"],
+            )
+            conn.commit()
+            extraction_results.append({"url": crawled.url, **result})
+        except Exception as exc:
+            conn = _recover_connection(conn, config)
+            skipped.append(f"{crawled.url}: extraction failed -- {exc}")
+
+    conn.close()
+
+    print(f"--- {len(uploaded)} ingested, {len(skipped)} skipped ---")
+    for line in skipped:
+        print(f"  SKIP  {line}")
+    total_claims = sum(r["claims_inserted"] for r in extraction_results)
+    total_products = sum(r["products"] for r in extraction_results)
+    all_dupes = [d for r in extraction_results for d in r.get("possible_duplicate_products", [])]
+    print(f"total claims inserted: {total_claims} across {total_products} product-touches, "
+          f"{len(extraction_results)} page(s) extracted")
+    if all_dupes:
+        print(f"possible duplicate products flagged ({len(all_dupes)}) -- review before trusting the catalog:")
+        for d in all_dupes:
+            print(f"  {d['new_name']!r} ~ existing {d['existing_name']!r} (similarity {d['similarity']})")
+    return 0
 
 
 def cmd_generate_report(args: argparse.Namespace) -> int:
@@ -784,6 +915,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest_dir.add_argument("--brand", required=True, help="brand slug; its organization owns the documents")
     p_ingest_dir.add_argument("--dir", required=True, help="directory of PDFs, must contain sources.json")
     p_ingest_dir.set_defaults(func=cmd_ingest_dir)
+
+    p_ingest_website = sub.add_parser(
+        "ingest-website",
+        help="crawl a brand's own live website and run it through the same extraction pipeline as a PDF",
+    )
+    p_ingest_website.add_argument("--brand-slug", required=True)
+    p_ingest_website.add_argument("--url", required=True,
+                                   help="start URL; only links under this same scheme+host+path-prefix are followed")
+    p_ingest_website.add_argument("--max-pages", type=int, default=300)
+    p_ingest_website.add_argument(
+        "--dry-run", action="store_true",
+        help="crawl and print discovered page URLs only -- no document/claim writes, no LLM cost "
+             "(the crawl itself does fetch each page, since link discovery requires it)",
+    )
+    p_ingest_website.set_defaults(func=cmd_ingest_website)
 
     p_report = sub.add_parser("generate-report", help="generate a data-coverage report for a brand")
     p_report.add_argument("--brand-slug", required=True)

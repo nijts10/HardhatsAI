@@ -15,6 +15,7 @@ from .embedding import Embedder
 from .extraction import PARSER_VERSION, PROMPT_VERSION, extract_claims, spec_attributes_for_category
 from .parsing import claude_vision_extractor, parse_pdf
 from .persistence import persist_extracted_products, persist_unmapped_findings
+from .webpage import parse_webpage
 
 
 def run(conn, config: Config, *, document_version_id: str) -> dict:
@@ -39,8 +40,51 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
 
     anthropic_client = Anthropic(api_key=config.anthropic_api_key)
     vision_extractor = claude_vision_extractor(anthropic_client, config.anthropic_model)
-
     pages = parse_pdf(pdf_bytes, vision_extractor=vision_extractor)
+
+    return _chunk_embed_extract_persist(
+        conn, config, document_version_id=document_version_id, brand_id=product_row["brand_id"],
+        brand_name=product_row["brand_name"], category_id=product_row["category_id"],
+        pages=pages, anthropic_client=anthropic_client, scope_by_category=True,
+    )
+
+
+def run_webpage(conn, config: Config, *, document_version_id: str, brand_id: str, brand_name: str) -> dict:
+    """Same pipeline as run(), for a page of the brand's own live website
+    instead of an uploaded PDF -- see webpage.py's module docstring for
+    why this is genuinely the same standard, not a second weaker one.
+
+    Two real differences from run(): (1) the source bytes are HTML fetched
+    earlier and archived to Storage (by the ingest-website CLI command),
+    parsed into the same ParsedPage shape via webpage.parse_webpage()
+    instead of parse_pdf(); (2) no category scoping -- a crawled page's
+    category isn't known ahead of time the way an uploaded datasheet's
+    product is, so the full spec_attributes vocabulary is always asked
+    about rather than narrowed to one product's category tree. Category_id
+    is therefore not required here; a newly-created product from a
+    webpage claim gets category_id=None (matches the existing "not yet
+    known" convention -- see spec_attributes_for_category's own docstring)
+    unless it already exists under a category from prior PDF ingestion, in
+    which case persistence.py's exact-name-slug match reuses that
+    existing row (and its category) automatically."""
+    version = db.get_document_version(conn, document_version_id)
+    client = storage.make_client(config.supabase_url, config.supabase_service_role_key)
+    html_bytes = storage.download(client, version["storage_path"])
+
+    anthropic_client = Anthropic(api_key=config.anthropic_api_key)
+    page = parse_webpage(html_bytes.decode("utf-8", errors="replace"), version["source_url"])
+
+    return _chunk_embed_extract_persist(
+        conn, config, document_version_id=document_version_id, brand_id=brand_id,
+        brand_name=brand_name, category_id=None, pages=[page],
+        anthropic_client=anthropic_client, scope_by_category=False,
+    )
+
+
+def _chunk_embed_extract_persist(
+    conn, config: Config, *, document_version_id: str, brand_id: str, brand_name: str,
+    category_id: str | None, pages: list, anthropic_client: Anthropic, scope_by_category: bool,
+) -> dict:
     for page in pages:
         db.insert_page(conn, document_version_id, page.page_number, page.text, page.layout)
 
@@ -64,8 +108,11 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
     # any approved key the model states even if it fell outside this product's
     # category scope below -- the scoping only narrows what we ASK about.
     spec_attrs_by_key = {d["key"]: d for d in spec_attributes}
-    category_codes = db.get_category_ancestor_codes(conn, product_row["category_id"])
-    prompt_spec_attributes = spec_attributes_for_category(spec_attributes, category_codes)
+    if scope_by_category:
+        category_codes = db.get_category_ancestor_codes(conn, category_id)
+        prompt_spec_attributes = spec_attributes_for_category(spec_attributes, category_codes)
+    else:
+        prompt_spec_attributes = spec_attributes
     all_chunks = db.get_all_chunks(conn, document_version_id)
 
     run_id = db.start_extraction_run(
@@ -76,7 +123,7 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
 
     try:
         extracted = extract_claims(
-            anthropic_client, model=config.anthropic_model, brand_name=product_row["brand_name"],
+            anthropic_client, model=config.anthropic_model, brand_name=brand_name,
             spec_attributes=prompt_spec_attributes, chunks=all_chunks,
         )
     except Exception as exc:
@@ -87,7 +134,7 @@ def run(conn, config: Config, *, document_version_id: str) -> dict:
         return db.get_page_text(conn, document_version_id, page_number)
 
     stats = persist_extracted_products(
-        conn, brand_id=product_row["brand_id"], category_id=product_row["category_id"],
+        conn, brand_id=brand_id, category_id=category_id,
         document_version_id=document_version_id, extraction_run_id=run_id,
         extracted_products=extracted.products, spec_attrs_by_key=spec_attrs_by_key,
         document_chunks=all_chunks, get_page_text=get_page_text,
