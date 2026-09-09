@@ -68,11 +68,16 @@ class ScoreCard:
     claims_extracted_for_run: bool
 
 
-def compute_presence_rate(conn, *, run_id: str, brand_name: str) -> IntentScore:
+def compute_presence_rate(conn, *, run_id: str, brand_name: str, brand_id: str | None = None) -> IntentScore:
+    # Sub-brand names (HeartFelt, PareauLux, Luxalon, ...) count as a real
+    # mention too -- see detect_mention's own docstring for why. brand_id
+    # is optional so a caller without one (or a test) still gets the
+    # pre-existing, brand-name-only behaviour, not an error.
+    aliases = [pl["name"] for pl in db.get_product_lines_for_brand(conn, brand_id)] if brand_id else []
     per_intent: dict[str, list[int]] = {}
     overall = [0, 0]
     for row in db.get_answers_with_intent_for_run(conn, run_id):
-        mentioned, _ = detect_mention(row["response_text"], brand_name)
+        mentioned, _ = detect_mention(row["response_text"], brand_name, aliases)
         bucket = per_intent.setdefault(row["intent"], [0, 0])
         bucket[1] += 1
         overall[1] += 1
@@ -123,7 +128,7 @@ def compute_scorecard(conn, *, run_id: str) -> ScoreCard:
     return ScoreCard(
         run_id=run_id,
         brand_name=run["brand_name"],
-        presence_rate=compute_presence_rate(conn, run_id=run_id, brand_name=run["brand_name"]),
+        presence_rate=compute_presence_rate(conn, run_id=run_id, brand_name=run["brand_name"], brand_id=run["brand_id"]),
         share_of_voice=compute_share_of_voice(conn, run_id=run_id),
         spec_accuracy=compute_spec_accuracy(conn, run_id=run_id),
         data_completeness=compute_coverage(conn, run["brand_id"]).completeness,

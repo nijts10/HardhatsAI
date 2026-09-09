@@ -23,15 +23,33 @@ from psycopg.types.json import Json
 BenchmarkCaller = Callable[[str], str]
 
 
-def detect_mention(response_text: str, brand_name: str) -> tuple[bool, int | None]:
+def detect_mention(
+    response_text: str, brand_name: str, aliases: list[str] | None = None,
+) -> tuple[bool, int | None]:
     """Case-insensitive substring match. Deliberately simple and honest —
     no fuzzy matching that could inflate the rate, no claim of true rank,
-    just: does the brand's name appear, and where."""
-    needle = brand_name.strip().lower()
-    if not needle:
-        return False, None
-    offset = response_text.lower().find(needle)
-    return (offset != -1), (offset if offset != -1 else None)
+    just: does the brand's name (or one of its aliases) appear, and where.
+
+    aliases defaults to none -- existing callers (the old run-benchmark
+    command) are unaffected. scoring.py's compute_presence_rate passes
+    the brand's product_lines (HeartFelt, PareauLux, Luxalon, ...) here,
+    found missing 2026-09-09 per the prompt-taxonomy-proposal: an answer
+    that correctly recommends "HeartFelt" without also saying "Hunter
+    Douglas" was being counted as a non-mention, undercounting real
+    visibility on exactly the prompts where product correctness (not
+    literal company-name recall) is what matters. Returns the EARLIEST
+    match across brand name and all aliases, not just the first one
+    checked, so offset stays meaningful for "where in the answer"."""
+    candidates = [brand_name] + list(aliases or [])
+    best_offset: int | None = None
+    for candidate in candidates:
+        needle = candidate.strip().lower()
+        if not needle:
+            continue
+        offset = response_text.lower().find(needle)
+        if offset != -1 and (best_offset is None or offset < best_offset):
+            best_offset = offset
+    return (best_offset is not None), best_offset
 
 
 def make_chatgpt_caller(api_key: str, model: str) -> BenchmarkCaller:

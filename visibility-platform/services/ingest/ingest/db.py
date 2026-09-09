@@ -84,6 +84,16 @@ def create_product(
         return cur.fetchone()["id"]
 
 
+def get_product_lines_for_brand(conn: psycopg.Connection, brand_id: str) -> list[dict]:
+    """Every named sub-brand/line for a brand (e.g. HeartFelt, PareauLux,
+    Luxalon) -- used by benchmark.detect_mention() so an AI answer that
+    correctly recommends "HeartFelt" without saying "Hunter Douglas" is
+    counted as a real mention instead of a miss."""
+    with conn.cursor() as cur:
+        cur.execute("select * from product_lines where brand_id = %s order by name", (brand_id,))
+        return cur.fetchall()
+
+
 def get_product_line_by_slug(conn: psycopg.Connection, brand_id: str, slug: str) -> Optional[dict]:
     with conn.cursor() as cur:
         cur.execute(

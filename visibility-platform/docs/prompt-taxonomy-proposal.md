@@ -1,10 +1,22 @@
 # Prompt taxonomy redesign — proposal (2026-08-14)
 
-**Status: proposal, under review with stijn. Not yet applied to the
-`prompts` table or `scoring.py` — the current 7-intent enum
-(`spec_constrained`/`application_driven`/`comparative`/`compliance`/
-`sustainability`/`brand_direct`/`problem_driven`, see `0014_prompts.sql`)
-is still what's live.**
+**Status: APPLIED 2026-09-09 (migrations 0022/0023), after concrete
+evidence justified it — 7 of 8 old `compliance` prompts produced ZERO
+brand mentions from ANY brand on a real Hunter Douglas run, proving
+`presence_rate` was close to meaningless for that category. The
+`prompt_intent` enum now has 8 axis-coded values
+(`a1_functie_gedreven`/`a2_leverancier_categorie`/
+`a3_concurrent_vergelijking`/`b1_eis_gedreven`/`b2_norm_regelgeving`/
+`b3_duurzaamheidseis`/`b4_probleem_gedreven`/`c1_merk_specifiek`); the old
+7 values remain defined (Postgres can't drop an enum value) but are no
+longer used. `detect_mention()` also now credits a brand's sub-brand
+names (via the new `product_lines` table), not just the literal company
+name. See `services/ingest/ingest/pdf_report.py`'s `INTENT_GLOSSARY` for
+the applied category definitions and axis assignments — they match this
+proposal with one refinement made during implementation: the four
+generic material-vs-material `comparative` prompts (no brand named
+either side) went to `b1_eis_gedreven`, not a2/a3, since they're really
+property comparisons, not supplier requests.**
 
 ## Why
 

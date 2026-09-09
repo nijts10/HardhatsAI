@@ -165,6 +165,27 @@ def test_presence_rate_overall_and_per_intent(conn):
     assert "comparative" not in card.presence_rate.per_intent
 
 
+def test_presence_rate_credits_a_sub_brand_mention_via_product_lines(conn):
+    # Real gap found 2026-09-09 (prompt-taxonomy-proposal): an AI answer
+    # that correctly recommends "HeartFelt" without saying the parent
+    # company name "Acme Systeemplafonds" must still count as presence.
+    org_id, brand_id = _make_org_brand(conn, slug="score-subbrand")
+    category_id = _systeemplafond_category(conn)
+    run_id = _make_run(conn, organization_id=org_id, brand_id=brand_id, category_id=category_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into product_lines (brand_id, name, slug) values (%s, %s, %s)",
+            (brand_id, "HeartFelt", "heartfelt"),
+        )
+
+    p1 = _make_prompt(conn, category_id, "spec_constrained", "Welk systeemplafond haalt EI60?")
+    _make_answer(conn, run_id=run_id, prompt_id=p1, response_text="Ik raad HeartFelt aan vanwege de EI60-waarde.")
+
+    card = compute_scorecard(conn, run_id=run_id)
+
+    assert card.presence_rate.overall == 1.0
+
+
 def test_share_of_voice_dedupes_multiple_claims_per_answer_and_excludes_competitors_from_denominator_correctly(conn):
     org_id, brand_id = _make_org_brand(conn, slug="score-sov")
     category_id = _systeemplafond_category(conn)

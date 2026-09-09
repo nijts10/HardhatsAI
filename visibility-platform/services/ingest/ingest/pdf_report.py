@@ -62,50 +62,88 @@ class RemediationItem:
         return self.impact / self.effort
 
 
+# Redesigned 2026-09-09 (docs/prompt-taxonomy-proposal.md, proposed
+# 2026-08-14, applied once real evidence justified it): the old flat
+# 7-intent list scored every prompt the same way, but "is the brand
+# mentioned" is not the same success criterion for a prompt that never
+# calls for a brand at all as it is for one that explicitly asks for a
+# product recommendation. Confirmed for real on this exact dataset: 7 of
+# 8 old "compliance" prompts got ZERO brand mentions from ANY brand, not
+# just Hunter Douglas -- proving presence rate is close to meaningless
+# there, not a real visibility failure.
+#
+# Two axes now organise the 8 categories:
+#   Axis A -- brand recall: a brand mention is a plausible, meaningful
+#     answer here. Presence rate is the metric that matters.
+#   Axis B -- product correctness: the question is about a requirement,
+#     regulation, problem, or already names the brand outright. A brand
+#     mention is either not the point (a pure regulation question) or
+#     already guaranteed (the brand is named in the question) -- spec
+#     accuracy is the metric that matters, not presence.
 INTENT_GLOSSARY: dict[str, dict[str, str]] = {
-    "spec_constrained": {
-        "label": "Requirement-driven",
-        "definition": "The question states concrete, measurable requirements (values, standards, dimensions) "
-                       "and asks for a product that meets them -- the way a specifier searches once they "
-                       "already know what they need.",
-        "example": "Systeemplafond met αw minimaal 0,90 en brandklasse A2-s1,d0",
-    },
-    "application_driven": {
+    "a1_functie_gedreven": {
         "label": "Application-driven",
+        "axis": "A",
         "definition": "The question describes a room or use case (classroom, swimming pool, operating theatre) "
-                       "without stating any concrete specs, and asks what would be suitable there.",
+                       "without stating any concrete specs, and asks what would be suitable there. A brand "
+                       "being volunteered here is a real, meaningful signal.",
         "example": "Welk systeemplafond is geschikt voor een klaslokaal met veel nagalm?",
     },
-    "comparative": {
-        "label": "Comparative",
-        "definition": "The question explicitly compares two or more brands/products with each other, often "
-                       "including named competitors.",
+    "a2_leverancier_categorie": {
+        "label": "Supplier/category search",
+        "axis": "A",
+        "definition": "The question directly asks which manufacturers or suppliers offer a category of product. "
+                       "The most literal possible test of brand recall -- if a brand doesn't come up here, it "
+                       "isn't in the AI's consideration set for this category at all.",
+        "example": "Welke fabrikanten leveren akoestische systeemplafonds voor kantoren?",
+    },
+    "a3_concurrent_vergelijking": {
+        "label": "Competitor-initiated comparison",
+        "axis": "A",
+        "definition": "The question names a competitor (or asks about one directly) without naming this brand. "
+                       "Tests whether the brand gets volunteered as an alternative even when the conversation "
+                       "started elsewhere.",
         "example": "Rockfon of Ecophon voor een schoolgebouw, wat is het verschil?",
     },
-    "compliance": {
+    "b1_eis_gedreven": {
+        "label": "Requirement-driven",
+        "axis": "B",
+        "definition": "The question states concrete, measurable requirements (values, standards, dimensions), "
+                       "or compares technical properties directly, and asks for a product that meets them. "
+                       "A brand mention is not guaranteed by the question -- presence rate is a genuine "
+                       "signal here, but spec accuracy is what actually proves the AI got it right.",
+        "example": "Systeemplafond met αw minimaal 0,90 en brandklasse A2-s1,d0",
+    },
+    "b2_norm_regelgeving": {
         "label": "Regulation-driven",
+        "axis": "B",
         "definition": "The question is about legal requirements, building-code or standard obligations, not "
-                       "about a specific product.",
+                       "about a specific product. A correct, complete answer often does not need to name any "
+                       "brand at all -- presence rate near zero here is expected, not a failure; the "
+                       "meaningful check is whether the AI's stated requirement itself is accurate.",
         "example": "Welke eisen stelt het Bouwbesluit aan geluidsabsorptie in een klaslokaal?",
     },
-    "sustainability": {
+    "b3_duurzaamheidseis": {
         "label": "Sustainability-driven",
+        "axis": "B",
         "definition": "The question is about environmental impact: MKI, GWP, recyclability, EPDs, Cradle to "
-                       "Cradle certification.",
+                       "Cradle certification -- an eis (requirement), same shape as b1_eis_gedreven.",
         "example": "Systeemplafond met de laagste MKI-waarde",
     },
-    "brand_direct": {
-        "label": "Brand-specific",
-        "definition": "The question names the brand itself. This is the only category where \"being found\" "
-                       "is trivial (the brand name is already in the question) -- here, spec accuracy is the "
-                       "metric that actually matters, not presence rate.",
-        "example": "Welke akoestische plafonds levert Hunter Douglas?",
-    },
-    "problem_driven": {
+    "b4_probleem_gedreven": {
         "label": "Problem-driven",
+        "axis": "B",
         "definition": "The question describes a complaint or failure with an existing ceiling and asks for an "
-                       "alternative.",
+                       "alternative -- the requirement is implicit in the described problem.",
         "example": "Mijn systeemplafond hangt door bij hoge luchtvochtigheid, welk alternatief?",
+    },
+    "c1_merk_specifiek": {
+        "label": "Brand-specific",
+        "axis": "B",
+        "definition": "The question names the brand itself, so \"being found\" is trivial by construction -- "
+                       "presence rate is not a meaningful metric here at all. Spec accuracy is the only "
+                       "thing worth measuring: does the AI state this brand's own specs correctly.",
+        "example": "Welke akoestische plafonds levert Hunter Douglas?",
     },
 }
 
@@ -241,6 +279,21 @@ PROMPT_RATIONALES: dict[str, str] = {
     "Welk plafondmerk publiceert een EPD volgens EN 15804?":
         "Tests whether the AI knows which brands have a compliant Environmental Product Declaration, a "
         "frequent tender requirement.",
+    # a2_leverancier_categorie -- added 2026-09-09 with the axis redesign;
+    # the original 50 had zero prompts genuinely shaped as "which
+    # suppliers offer X", so these are new, not re-tagged.
+    "Welke fabrikanten leveren akoestische systeemplafonds voor kantoren?":
+        "The most literal brand-recall test in the set: a direct request for a supplier list, with no "
+        "product or spec constraint to hide behind.",
+    "Noem leveranciers van metalen lamellenplafonds in Nederland":
+        "Tests recall for a specific product category (metal linear ceilings) in the local market, where "
+        "Hunter Douglas's Luxalon line is a real, established player.",
+    "Welke merken bieden systeemplafonds met Cradle to Cradle-certificering?":
+        "Tests whether the AI connects a specific certification to the brands that actually hold it, "
+        "rather than just naming the certification itself.",
+    "Wie zijn de belangrijkste leveranciers van houten roosterplafonds voor de zakelijke markt?":
+        "Tests recall for wood grille ceilings specifically, Derako's own category, phrased the way a "
+        "buyer doing initial market research would actually ask.",
 }
 
 
@@ -678,11 +731,22 @@ def render_pdf(data: ReportData, output_path: str) -> None:
     story.append(Paragraph("5. The research", ss["H1"]))
     story.append(Paragraph(
         f"We asked {n_prompts} questions, each repeated {run['replicates']} time(s) ({n_answers} answers "
-        f"total against {run['engine']} for this run). Every question was pre-assigned to one of 7 "
-        f"categories ({', '.join(INTENT_GLOSSARY)}), so we can see whether a brand is strong on one type of "
-        f"question but invisible on another -- that difference is the whole sales argument of this report. "
-        f"Below, each category is explained, followed by the real questions asked in it and why each one was "
-        f"chosen. The answers themselves are in the Appendix.", ss["Normal"],
+        f"total against {run['engine']} for this run). Every question was pre-assigned to one of 8 "
+        f"categories, so we can see whether a brand is strong on one type of question but invisible on "
+        f"another -- that difference is the whole sales argument of this report. Below, each category is "
+        f"explained, followed by the real questions asked in it and why each one was chosen. The answers "
+        f"themselves are in the Appendix.", ss["Normal"],
+    ))
+    story.append(Paragraph(
+        "<b>The 8 categories split across two axes, and this matters for how to read Section 6:</b> "
+        "<b>Axis A (brand recall)</b> categories are ones where a brand mention is itself a plausible, "
+        "meaningful answer -- presence rate is the metric that counts. <b>Axis B (product correctness)</b> "
+        "categories are about a requirement, a regulation, a problem, or already name the brand outright -- "
+        "a brand mention is either not the point of the question, or already guaranteed, so spec accuracy "
+        "is what actually matters there, not presence. Confirmed for real on this run: 7 of the 8 "
+        "b2_norm_regelgeving (regulation) questions produced ZERO brand mentions from ANY brand, not just "
+        "this one -- proving a low presence rate on that category reflects the question, not a visibility "
+        "gap.", ss["Normal"],
     ))
     story.append(Spacer(1, 3 * mm))
 
@@ -696,7 +760,7 @@ def render_pdf(data: ReportData, output_path: str) -> None:
         prompts = prompts_by_intent.get(intent, [])
         if not prompts:
             continue
-        story.append(Paragraph(f"{info['label']} ({intent})", ss["H2"]))
+        story.append(Paragraph(f"{info['label']} ({intent}) — Axis {info.get('axis', '?')}", ss["H2"]))
         story.append(Paragraph(info["definition"], ss["Normal"]))
         for prompt_text in prompts:
             rationale = PROMPT_RATIONALES.get(prompt_text, "")
@@ -776,18 +840,21 @@ def render_pdf(data: ReportData, output_path: str) -> None:
     if intents:
         story.append(Spacer(1, 4 * mm))
         story.append(Paragraph("Per question category", ss["H2"]))
-        rows = [["Category", "Presence Rate", "Share of Voice", "Spec Accuracy"]]
+        rows = [["Category", "Axis", "Presence Rate", "Share of Voice", "Spec Accuracy"]]
         for intent in intents:
-            rows.append([intent, _fmt_rate(sc.presence_rate.per_intent.get(intent)),
+            axis = INTENT_GLOSSARY.get(intent, {}).get("axis", "?")
+            rows.append([intent, axis, _fmt_rate(sc.presence_rate.per_intent.get(intent)),
                          _fmt_rate(sc.share_of_voice.per_intent.get(intent)),
                          _fmt_rate(sc.spec_accuracy.per_intent.get(intent))])
-        story.append(_table(rows, col_widths=[50 * mm, 35 * mm, 40 * mm, 35 * mm]))
+        story.append(_table(rows, col_widths=[48 * mm, 14 * mm, 32 * mm, 36 * mm, 30 * mm]))
     story.append(Spacer(1, 3 * mm))
     story.append(Paragraph(
-        "Why this matters: a brand can score strongly on brand_direct (where the name is already in the "
-        "question) while being invisible on spec_constrained (where a buyer names no brand, only a "
-        "requirement) -- that is exactly the difference between \"being recognised\" and \"being found\".",
-        ss["Small"],
+        "Why this matters: a brand can score strongly on an Axis A category (where a brand mention is a "
+        "plausible, meaningful answer) while scoring near zero on an Axis B category for a reason that has "
+        "nothing to do with visibility -- b2_norm_regelgeving questions, for example, are pure regulation "
+        "explanations; a correct, complete answer often names no brand at all. See Section 5 for which "
+        "category is which axis, and read a low presence rate on an Axis B category as \"the question "
+        "didn't call for a brand\", not as a visibility failure.", ss["Small"],
     ))
 
     story.append(PageBreak())
