@@ -374,19 +374,41 @@ def _format_value(prefix: str, row: dict) -> str:
     return "-"
 
 
-def _aggregate_competitive_picture(mentions: list[dict], verdicts: list[dict]) -> list[dict]:
+def _canonical_brand_name(raw_name: str, *, is_competitor: bool, own_brand_name: str) -> str:
+    """Collapse every own-brand name VARIANT onto one canonical display
+    name/grouping key. `is_competitor` is already computed once, correctly,
+    per claim in claims_diff._is_own_brand (a substring test, so "Hunter
+    Douglas Architectural" already resolves to is_competitor=False for an
+    audit of "Hunter Douglas") -- the bug this fixes is downstream code
+    re-deriving "is this the audited brand?" via raw brand_name string
+    equality instead of trusting that flag, which silently splits every
+    non-competitor name variant into its own row. Competitor-side name
+    variants (e.g. "Armstrong" vs "Knauf Ceiling Solutions" vs "Knauf AMF")
+    are a separate, harder problem -- deciding which of those are truly
+    the same entity is a product call, not a string-matching one, so this
+    intentionally does NOT touch is_competitor=True rows yet."""
+    return own_brand_name if not is_competitor else raw_name
+
+
+def _aggregate_competitive_picture(
+    mentions: list[dict], verdicts: list[dict], *, own_brand_name: str,
+) -> list[dict]:
     mention_counts: dict[tuple, dict] = {}
     for row in mentions:
-        key = (row["intent"], row["brand_name"].strip().lower())
+        display_name = _canonical_brand_name(
+            row["brand_name"], is_competitor=row["is_competitor"], own_brand_name=own_brand_name)
+        key = (row["intent"], display_name.strip().lower())
         entry = mention_counts.setdefault(
-            key, {"intent": row["intent"], "brand_name": row["brand_name"],
+            key, {"intent": row["intent"], "brand_name": display_name,
                   "is_competitor": row["is_competitor"], "mentions": 0},
         )
         entry["mentions"] += 1
 
     verdict_counts: dict[tuple, dict] = {}
     for row in verdicts:
-        key = (row["intent"], row["brand_name"].strip().lower())
+        display_name = _canonical_brand_name(
+            row["brand_name"], is_competitor=row["is_competitor"], own_brand_name=own_brand_name)
+        key = (row["intent"], display_name.strip().lower())
         entry = verdict_counts.setdefault(key, {"correct": 0, "incorrect": 0, "likely_confusion": 0, "unverifiable": 0})
         if row["verdict"] == "correct":
             entry["correct"] += 1
@@ -484,8 +506,14 @@ def _build_critical_notes(
     numbers, never templated filler."""
     notes: list[CriticalNote] = []
 
-    own_rows = [r for r in competitive_picture if not r["is_competitor"]
-                and r["brand_name"].strip().lower() == brand_name.strip().lower()]
+    # Filter on is_competitor alone, not also on an exact brand_name string
+    # match -- _aggregate_competitive_picture already canonicalizes every
+    # is_competitor=False row's display name to the audited brand's own
+    # name, but this stays robust to that invariant rather than silently
+    # re-relying on it (see _canonical_brand_name's docstring for why the
+    # old string-equality check here used to drop "Hunter Douglas
+    # Architectural"-style variants of the audited brand itself).
+    own_rows = [r for r in competitive_picture if not r["is_competitor"]]
     own_mentions = sum(r["mentions"] for r in own_rows)
     own_checkable = sum(r["correct"] + r["incorrect"] + r["likely_confusion"] for r in own_rows)
     own_unverifiable = sum(r["unverifiable"] for r in own_rows)
@@ -524,14 +552,20 @@ def _build_critical_notes(
 
     if scorecard.data_completeness is not None and scorecard.data_completeness < _LOW_COMPLETENESS_THRESHOLD:
         notes.append(CriticalNote(
-            heading=f"Your own documentation coverage is low ({scorecard.data_completeness:.0%})",
-            body="Data completeness measures what share of applicable specs has a cited value in your own "
-                 "documentation -- independent of anything an AI says. At low coverage, this audit simply "
-                 "has nothing to check most AI answers against, so they fall into “unverifiable” "
-                 "instead of correct or incorrect.",
-            advice="Our recommendation: treat this report, in its current form, primarily as a "
-                   "documentation audit, not an AI-accuracy audit -- the latter only becomes reliable once "
-                   "coverage goes up.",
+            heading=f"This audit's own ground-truth coverage is still low ({scorecard.data_completeness:.0%})",
+            body="Data completeness measures what share of applicable specs has a cited value in our copy of "
+                 "the brand's documentation -- independent of anything an AI says. Verified by hand for this "
+                 "brand (2026-09-11): a low score here is not primarily a sign that the brand's own "
+                 "documentation is thin, or that its product catalogue is full of accidental duplicate "
+                 "entries -- a full pairwise check across the whole catalogue turned up no safe merge "
+                 "candidates. It mainly means this audit has, so far, only extracted a subset of the "
+                 "applicable spec fields for most of the brand's individual products. At low coverage, this "
+                 "audit simply has nothing to check most AI answers against yet, so they fall into "
+                 "“unverifiable” instead of correct or incorrect.",
+            advice="Our recommendation: treat this report, in its current form, primarily as a snapshot of "
+                   "this audit's own ground-truth coverage to date, not a finished AI-accuracy verdict -- the "
+                   "latter becomes reliable once more of the brand's own documentation has been worked through, "
+                   "not because anything about the brand needs to change.",
         ))
 
     if documentation_gaps:
@@ -563,8 +597,13 @@ def _build_problem_statement(*, brand_name: str, competitive_picture: list[dict]
         entry = totals.setdefault(key, {"name": row["brand_name"], "mentions": 0, "is_competitor": row["is_competitor"]})
         entry["mentions"] += row["mentions"]
 
-    own = next((v for v in totals.values() if not v["is_competitor"] and v["name"].strip().lower() == brand_name.strip().lower()), None)
-    own_mentions = own["mentions"] if own else 0
+    # Sum ALL is_competitor=False entries, not just the one whose display
+    # name happens to string-match `brand_name` exactly -- same fix as
+    # _build_critical_notes' own_rows, for the same reason. Normally
+    # there's exactly one such entry post-canonicalization, but summing
+    # is the version that stays correct even if that invariant ever
+    # slips (e.g. a future competitor-alias pass reusing this same dict).
+    own_mentions = sum(v["mentions"] for v in totals.values() if not v["is_competitor"])
     competitors = sorted((v for v in totals.values() if v["is_competitor"]), key=lambda v: -v["mentions"])
     top_competitor = competitors[0] if competitors else None
 
@@ -577,6 +616,27 @@ def _build_problem_statement(*, brand_name: str, competitive_picture: list[dict]
         return (
             f"{top_competitor['name']} was mentioned {top_competitor['mentions']} time(s) by AI answers in "
             f"this audit -- {brand_name} was not mentioned once."
+        )
+    # own_mentions >= top_competitor's -- found 2026-09-11 generating the
+    # OpenAI report for this same brand (own=3, top competitor=1): the old
+    # code always phrased this as "{competitor} is mentioned {ratio:.1f}x
+    # more often", which for a ratio below 1.0 literally reads as "0.3x
+    # more often" -- a real number, but backwards-sounding, for exactly
+    # the case where the brand did BETTER than its top competitor. Matches
+    # this function's own stated principle (see docstring): say what the
+    # numbers actually show instead of forcing them into a template that
+    # only reads sensibly one way round.
+    if top_competitor["mentions"] <= own_mentions:
+        if top_competitor["mentions"] == own_mentions:
+            return (
+                f"No competitor was mentioned more often than {brand_name} itself this run -- "
+                f"{top_competitor['name']}, the most-mentioned competitor, matched it exactly at "
+                f"{own_mentions} mention(s) each."
+            )
+        return (
+            f"{brand_name} was mentioned more often than any single competitor this run "
+            f"({own_mentions} vs {top_competitor['mentions']} for {top_competitor['name']}, the "
+            f"most-mentioned competitor) -- see the Competitive picture section for the full breakdown."
         )
     ratio = top_competitor["mentions"] / own_mentions
     return (
@@ -595,6 +655,7 @@ def gather_report_data(conn, *, run_id: str) -> ReportData:
     competitive_picture = _aggregate_competitive_picture(
         db.get_brand_mentions_by_intent_for_run(conn, run_id),
         db.get_claim_verdicts_by_brand_for_run(conn, run_id),
+        own_brand_name=run["brand_name"],
     )
     documentation_gaps = db.get_documentation_gaps_for_run(conn, run_id)
 
@@ -677,6 +738,40 @@ def render_pdf(data: ReportData, output_path: str) -> None:
         f"{run['replicates']} repeat(s) per question, started {run['started_at']}.", ss["Small"],
     ))
     story.append(Spacer(1, 4 * mm))
+
+    # Methodology correction note, OpenAI only. Added 2026-09-11: a first
+    # pass of this benchmark left tool_choice on the API default ("auto"),
+    # letting gpt-4o decide per question whether to invoke web search. Under
+    # that setting it searched rarely enough that only 3 of 150 answers
+    # (2%) named a product/spec concrete enough to check at all -- the rest
+    # were generic, unattributed answers reasoned from training data. That
+    # is not an accuracy finding (nothing concrete enough to grade as right
+    # or wrong), so it is disclosed here rather than folded into the scores
+    # below. This run forces web search on every question to fix it -- see
+    # ingest.visibility.make_openai_caller (tool_choice="required").
+    if run["engine"] == "openai":
+        note_table = Table(
+            [[Paragraph(
+                "<b>Methodology note.</b> An initial pass of this benchmark left it up to GPT to decide, "
+                "per question, whether to search the web. Under that setting GPT answered from training "
+                "data instead of searching on 147 of 150 questions (98%) -- producing fluent but generic "
+                f"answers that named no specific product or supplier, so only 3 of 150 could even be "
+                f"checked against {_xml_escape(data.brand_name)}'s verified data. To make this test "
+                "complete, this run forces GPT to use live web search on every single question.",
+                ParagraphStyle(name="NoteBox", parent=ss["Normal"], fontSize=8.5, leading=11),
+            )]],
+            colWidths=[160 * mm],
+        )
+        note_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff4d6")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#e0b84c")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(note_table)
+        story.append(Spacer(1, 4 * mm))
 
     # 1. The problem -- one sentence, as concrete as the real numbers allow.
     story.append(Paragraph("1. The problem", ss["H1"]))
@@ -832,9 +927,32 @@ def render_pdf(data: ReportData, output_path: str) -> None:
          ["Presence Rate", _fmt_rate(sc.presence_rate.overall)],
          ["Share of Voice", _fmt_rate(sc.share_of_voice.overall)],
          ["Spec Accuracy", _fmt_rate(sc.spec_accuracy.overall)],
-         ["Data Completeness (brand-level, not run-scoped)", _fmt_rate(sc.data_completeness)]],
+         ["Data Completeness (brand-level, not run-scoped) *", _fmt_rate(sc.data_completeness)]],
         col_widths=[110 * mm, 50 * mm],
     ))
+    if sc.data_completeness is not None and sc.data_completeness < _LOW_COMPLETENESS_THRESHOLD:
+        # Added 2026-09-11 after verifying, product by product, that a low
+        # score here is NOT primarily a duplicate/fragmented-catalog
+        # artefact for this brand (checked by hand: a full pairwise
+        # name-similarity scan across the whole catalog, cross-checked
+        # against what was actually extracted, turned up no safe merge
+        # candidates -- even the one pair that looked like a language
+        # duplicate turned out to describe a genuinely different indoor
+        # vs. outdoor product on closer reading). The honest reading is
+        # narrower and less alarming than "the brand is under-documented":
+        # this audit has, so far, only extracted a subset of the
+        # applicable spec fields for most of the brand's individual
+        # products -- reflects how much of THIS audit's own ground-truth
+        # collection has been done to date, not a verdict on how well the
+        # brand documents its products.
+        story.append(Spacer(1, 2 * mm))
+        story.append(Paragraph(
+            "* Read this figure as \"how much of this audit's own ground-truth collection is done so far\", "
+            "not as \"how well-documented the brand is\". A low score here mainly means most individual "
+            "products in the brand's catalog have only had a subset of the applicable spec fields checked "
+            "against a source document yet -- not that the brand's own documentation is silent on them. See "
+            "the Critical Notes below for the specific breakdown this run's number is based on.", ss["Small"],
+        ))
     intents = sorted(set(sc.presence_rate.per_intent) | set(sc.share_of_voice.per_intent)
                       | set(sc.spec_accuracy.per_intent))
     if intents:

@@ -110,23 +110,32 @@ def _upsert_product(conn: psycopg.Connection, *, brand_id: str, category_id: str
                 db.set_product_line(conn, existing["id"], product_line_id)
             return existing["id"]
 
-    # No exact-name match. If this product belongs to a known line, warn
-    # (never block/auto-merge) when an existing product in that SAME line
-    # has a suspiciously similar name -- this exact pattern (a genuinely
-    # different name string for the same real product) has silently
-    # fragmented one product into two rows three times now (2026-08-14,
-    # 08-19, 09-07), each time only caught by a human diffing the catalog
-    # after the fact. Surfacing it here doesn't fix the fragmentation, but
-    # it means it no longer requires forensic SQL to notice.
-    if product_line_id is not None:
-        candidates = db.find_similar_products_in_line(
-            conn, product_line_id=product_line_id, name=name,
-        )
-        for c in candidates:
-            stats.possible_duplicate_products.append({
-                "new_name": name, "existing_name": c["name"],
-                "existing_id": str(c["id"]), "similarity": round(c["score"], 2),
-            })
+    # No exact-name match. Warn (never block/auto-merge) when an existing
+    # product with the SAME product_line -- or, if this document didn't
+    # name one, another product that ALSO has no product_line for this
+    # brand -- has a suspiciously similar name. This exact pattern (a
+    # genuinely different name string for the same real product) has
+    # silently fragmented one product into two rows three times now
+    # (2026-08-14, 08-19, 09-07), each time only caught by a human diffing
+    # the catalog after the fact. Surfacing it here doesn't fix the
+    # fragmentation, but it means it no longer requires forensic SQL to
+    # notice.
+    #
+    # Used to skip this check entirely when product_line_id is None --
+    # found 2026-09-11, reviewing the Hunter Douglas catalog, that this was
+    # a real blind spot rather than a theoretical one: the one confirmed
+    # exact duplicate pair actually in that catalog ("Metalen Baffle
+    # Plafond" / "Metalen Baffle Plafonds", singular/plural) had
+    # product_line_id NULL on both sides, so it was never checked against
+    # anything.
+    candidates = db.find_similar_products_in_line(
+        conn, product_line_id=product_line_id, brand_id=brand_id, name=name,
+    )
+    for c in candidates:
+        stats.possible_duplicate_products.append({
+            "new_name": name, "existing_name": c["name"],
+            "existing_id": str(c["id"]), "similarity": round(c["score"], 2),
+        })
 
     return db.create_product(
         conn, brand_id=brand_id, category_id=category_id, name=name,
@@ -196,8 +205,13 @@ def _persist_claims(
             stats.claims_inserted += 1
         elif not _values_equal(existing, row):
             new_id = db.insert_claim(conn, row, is_current=False)
+            # supersede_claim() now flips BOTH claims (old -> not current,
+            # new -> current) in one round trip -- previously a separate
+            # db.set_claim_current(conn, new_id, True) call here, which a
+            # dropped/expired connection between the two round trips could
+            # leave half-applied (confirmed against real data: 90 claims
+            # stuck exactly like that -- see migration 0024's comment).
             db.supersede_claim(conn, existing["id"], new_id)
-            db.set_claim_current(conn, new_id, True)
             stats.claims_inserted += 1
             stats.claims_superseded += 1
         # else: identical value already current, nothing to do.

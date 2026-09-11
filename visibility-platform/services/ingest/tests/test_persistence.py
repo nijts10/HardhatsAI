@@ -497,6 +497,59 @@ def test_persist_no_warning_across_different_product_lines(conn):
     assert stats.possible_duplicate_products == []
 
 
+def test_persist_warns_on_similar_name_with_no_product_line(conn):
+    # Regression test: find_similar_products_in_line used to be skipped
+    # entirely whenever product_line_id was None (persistence.py's old
+    # `if product_line_id is not None:` guard) -- a real blind spot found
+    # 2026-09-11 reviewing the Hunter Douglas catalog, where the one
+    # confirmed genuine duplicate pair ("Metalen Baffle Plafond" / "Metalen
+    # Baffle Plafonds") had NO product_line on either side and so was never
+    # checked against anything. Neither extracted_product below names a
+    # product_line -- the warning must still fire.
+    org_id, brand_id = _make_org_brand_product(conn, org_slug="kappa")
+    with conn.cursor() as cur:
+        cur.execute("insert into products (brand_id, name, slug) values (%s, %s, %s) returning id",
+                    (brand_id, "placeholder", "placeholder-kappa"))
+        placeholder_product_id = cur.fetchone()["id"]
+
+    def make_extracted(name):
+        return [{
+            "name": name,
+            "claims": [{"key": "demountable", "presence": "not_stated"}],
+        }]
+
+    _, version_id_1 = _make_document(conn, org_id, placeholder_product_id, "a" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_1,))
+        run_1 = cur.fetchone()["id"]
+    persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_1,
+        extraction_run_id=run_1, extracted_products=make_extracted("Metalen Baffle Plafond"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    _, version_id_2 = _make_document(conn, org_id, placeholder_product_id, "b" * 64)
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into extraction_runs (document_version_id, parser_version, prompt_version, model) "
+            "values (%s, '1', '1', 'test-model') returning id", (version_id_2,))
+        run_2 = cur.fetchone()["id"]
+    stats = persist_extracted_products(
+        conn, brand_id=brand_id, category_id=None, document_version_id=version_id_2,
+        extraction_run_id=run_2, extracted_products=make_extracted("Metalen Baffle Plafonds"),
+        spec_attrs_by_key=_spec_attrs_by_key(conn), document_chunks=[],
+        get_page_text=lambda p: "n/a",
+    )
+
+    assert len(stats.possible_duplicate_products) == 1
+    warning = stats.possible_duplicate_products[0]
+    assert warning["new_name"] == "Metalen Baffle Plafonds"
+    assert warning["existing_name"] == "Metalen Baffle Plafond"
+
+
 def test_persist_variants_get_distinct_current_claims_per_variant(conn):
     # The whole point of fix 6: two variants of one product can carry
     # DIFFERENT values for the same spec (e.g. sound reduction by

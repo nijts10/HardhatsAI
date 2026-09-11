@@ -7,6 +7,7 @@ from psycopg.types.json import Json
 from ingest.pdf_report import (
     RemediationItem,
     _aggregate_competitive_picture,
+    _build_problem_statement,
     _build_remediation,
     gather_report_data,
     generate_pdf_report,
@@ -28,7 +29,7 @@ def test_aggregate_competitive_picture_dedupes_mentions_and_counts_verdicts():
         {"intent": "comparative", "brand_name": "Acme", "is_competitor": False, "verdict": "incorrect"},
         {"intent": "comparative", "brand_name": "Rival", "is_competitor": True, "verdict": "unverifiable_product"},
     ]
-    rows = _aggregate_competitive_picture(mentions, verdicts)
+    rows = _aggregate_competitive_picture(mentions, verdicts, own_brand_name="Acme")
     by_brand = {r["brand_name"].lower(): r for r in rows}
 
     assert by_brand["acme"]["mentions"] == 2  # the two mention rows collapse into the SAME (intent, normalised-name) key
@@ -36,6 +37,54 @@ def test_aggregate_competitive_picture_dedupes_mentions_and_counts_verdicts():
     assert by_brand["acme"]["incorrect"] == 1
     assert by_brand["rival"]["is_competitor"] is True
     assert by_brand["rival"]["unverifiable"] == 1
+
+
+def test_aggregate_competitive_picture_merges_own_brand_name_variants():
+    """Regression test for the bug found reviewing the 2026-09 Hunter
+    Douglas report: is_competitor=False claims naming "Hunter Douglas
+    Architectural" (a real substring-match variant of the audited "Hunter
+    Douglas") were counted as a SEPARATE brand from plain "Hunter Douglas"
+    in the competitive picture, undercounting the audited brand's own
+    mention total by ~33% in that run and corrupting the report's own
+    front-page headline stat."""
+    mentions = [
+        {"intent": "comparative", "brand_name": "Acme", "is_competitor": False},
+        {"intent": "comparative", "brand_name": "Acme Architectural", "is_competitor": False},
+        {"intent": "comparative", "brand_name": "Rival", "is_competitor": True},
+    ]
+    verdicts: list[dict] = []
+    rows = _aggregate_competitive_picture(mentions, verdicts, own_brand_name="Acme")
+    own_rows = [r for r in rows if not r["is_competitor"]]
+
+    assert len(own_rows) == 1  # both name variants collapse into ONE row
+    assert own_rows[0]["brand_name"] == "Acme"  # display name is always the canonical audited name
+    assert own_rows[0]["mentions"] == 2
+
+
+def test_build_problem_statement_when_brand_beats_top_competitor():
+    # Regression test for the OpenAI-report bug found 2026-09-11: with
+    # own_mentions=3 and top competitor's mentions=1, the old code always
+    # said "{competitor} is mentioned {ratio:.1f}x more often" -- for
+    # ratio = 1/3 = 0.3 that reads as "mentioned 0.3x more often", which
+    # is backwards-sounding for the case where the brand actually did
+    # BETTER than every competitor.
+    picture = [
+        {"intent": "x", "brand_name": "Acme", "is_competitor": False, "mentions": 3},
+        {"intent": "x", "brand_name": "Rival", "is_competitor": True, "mentions": 1},
+    ]
+    statement = _build_problem_statement(brand_name="Acme", competitive_picture=picture)
+    assert "0.3x" not in statement
+    assert "3" in statement and "1" in statement
+    assert "more often than any single competitor" in statement
+
+
+def test_build_problem_statement_when_brand_ties_top_competitor():
+    picture = [
+        {"intent": "x", "brand_name": "Acme", "is_competitor": False, "mentions": 2},
+        {"intent": "x", "brand_name": "Rival", "is_competitor": True, "mentions": 2},
+    ]
+    statement = _build_problem_statement(brand_name="Acme", competitive_picture=picture)
+    assert "matched it exactly" in statement
 
 
 def test_build_remediation_orders_by_impact_over_effort():

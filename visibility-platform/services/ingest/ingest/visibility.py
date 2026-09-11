@@ -87,6 +87,17 @@ def make_openai_caller(api_key: str, model: str) -> VisibilityCaller:
             model=model,
             input=prompt_text,
             tools=[{"type": "web_search"}],
+            # Force tool use on every call. Left on "auto" (the default), gpt-4o
+            # answered from training data on 147/150 prompts (2026-09-11 run
+            # ccec9f5f) and only fell back to web_search when it judged the
+            # question needed live data -- producing generic, unchecked answers
+            # for the rest. "required" is the only tool_choice option that
+            # reliably forces it without depending on the exact web_search type
+            # string being accepted by tool_choice (the SDK's ToolChoiceTypesParam
+            # literal only lists web_search_preview variants, not plain
+            # web_search); since web_search is the sole tool offered, "required"
+            # forces exactly that one.
+            tool_choice="required",
         )
         citations: list[str] = []
         for item in getattr(response, "output", None) or []:

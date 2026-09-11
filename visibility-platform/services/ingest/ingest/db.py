@@ -121,8 +121,8 @@ def set_product_line(conn: psycopg.Connection, product_id: str, product_line_id:
 
 
 def find_similar_products_in_line(
-    conn: psycopg.Connection, *, product_line_id: str, name: str, exclude_product_id: Optional[str] = None,
-    threshold: float = 0.35,
+    conn: psycopg.Connection, *, product_line_id: Optional[str], brand_id: str, name: str,
+    exclude_product_id: Optional[str] = None, threshold: float = 0.35,
 ) -> list[dict]:
     """pg_trgm similarity of `name` against every OTHER product already in
     this same product_line -- same technique claims_diff.py already uses to
@@ -133,19 +133,30 @@ def find_similar_products_in_line(
     real product into two rows three separate times (2026-08-14, 08-19,
     09-07). Never auto-merges -- vocabulary/identity decisions stay
     human-curated (same principle as spec_attributes), this only surfaces
-    the candidate for review via PersistStats.possible_duplicate_products."""
+    the candidate for review via PersistStats.possible_duplicate_products.
+
+    product_line_id=None (found 2026-09-11, reviewing the Hunter Douglas
+    catalog) used to mean "skip this check entirely" one level up in
+    persistence.py's `if product_line_id is not None:` guard -- silently
+    blind to exactly the products a document didn't name a sub-line for,
+    which in that catalog turned out to include the one confirmed real
+    duplicate pair found by hand ("Metalen Baffle Plafond" vs "Metalen
+    Baffle Plafonds", singular/plural, both product_line_id NULL). Now
+    compares against every OTHER same-brand product that ALSO has no
+    product_line, instead of skipping."""
     with conn.cursor() as cur:
         cur.execute(
             """
             select id, name, similarity(name, %(name)s) as score
               from products
-             where product_line_id = %(product_line_id)s
+             where brand_id = %(brand_id)s
+               and product_line_id is not distinct from %(product_line_id)s
                and id is distinct from %(exclude_product_id)s
                and similarity(name, %(name)s) >= %(threshold)s
              order by score desc
             """,
             {
-                "name": name, "product_line_id": product_line_id,
+                "name": name, "product_line_id": product_line_id, "brand_id": brand_id,
                 "exclude_product_id": exclude_product_id, "threshold": threshold,
             },
         )
@@ -447,6 +458,14 @@ def set_claim_current(conn: psycopg.Connection, claim_id: str, is_current: bool)
 
 
 def supersede_claim(conn: psycopg.Connection, old_claim_id: str, new_claim_id: str) -> None:
+    """One round trip, atomically: marks old_claim_id not-current (and
+    superseded_by=new_claim_id) AND marks new_claim_id current -- both in
+    the single SQL function body (migration 0024). Callers must NOT
+    follow this with a separate set_claim_current(new_claim_id, True);
+    that used to be a second round trip and a dropped/expired connection
+    between the two could leave the new claim inserted but stuck
+    is_current=false forever (confirmed: 90 real claims found in exactly
+    that state, all sourced from the long-running website crawl)."""
     with conn.cursor() as cur:
         cur.execute("select supersede_claim(%s, %s)", (old_claim_id, new_claim_id))
 
